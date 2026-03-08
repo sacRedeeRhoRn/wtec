@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 260" role="img" aria-label="wtec layers">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#111827"/>
+      <stop offset="100%" stop-color="#1f2937"/>
+    </linearGradient>
+    <linearGradient id="top" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#d8e2dc"/>
+      <stop offset="100%" stop-color="#f0efeb"/>
+    </linearGradient>
+    <linearGradient id="mid" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffafcc"/>
+      <stop offset="100%" stop-color="#bde0fe"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="260" fill="url(#bg)"/>
+
+  <rect x="180" y="45" width="840" height="42" rx="21" fill="url(#top)" opacity="0.88"/>
+  <rect x="140" y="108" width="920" height="44" rx="22" fill="url(#mid)" opacity="0.92"/>
+  <rect x="180" y="173" width="840" height="42" rx="21" fill="url(#top)" opacity="0.88"/>
+
+  <g fill="#ffffff" fill-opacity="0.75">
+    <circle cx="230" cy="66" r="2.4"/>
+    <circle cx="340" cy="194" r="2.4"/>
+    <circle cx="480" cy="66" r="2.4"/>
+    <circle cx="620" cy="194" r="2.4"/>
+    <circle cx="760" cy="66" r="2.4"/>
+    <circle cx="910" cy="194" r="2.4"/>
+  </g>
+</svg>

@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" role="img" aria-label="wtec veil">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#231942"/>
+      <stop offset="45%" stop-color="#5e548e"/>
+      <stop offset="100%" stop-color="#be95c4"/>
+    </linearGradient>
+    <linearGradient id="silkA" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ffcad4" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#fde2e4" stop-opacity="0.08"/>
+    </linearGradient>
+    <linearGradient id="silkB" x1="100%" y1="0%" x2="0%" y2="0%">
+      <stop offset="0%" stop-color="#ffc8dd" stop-opacity="0.62"/>
+      <stop offset="100%" stop-color="#f8edeb" stop-opacity="0.12"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="360" fill="url(#bg)"/>
+
+  <path
+    d="M -80 220 C 180 110, 340 300, 600 195 C 860 90, 1010 270, 1280 150"
+    fill="none"
+    stroke="url(#silkA)"
+    stroke-width="88"
+    stroke-linecap="round"
+  />
+  <path
+    d="M -40 300 C 220 190, 450 380, 700 260 C 910 162, 1040 322, 1260 220"
+    fill="none"
+    stroke="url(#silkB)"
+    stroke-width="54"
+    stroke-linecap="round"
+  />
+
+  <g fill="#fff1f6" fill-opacity="0.8">
+    <circle cx="236" cy="120" r="3"/>
+    <circle cx="492" cy="73" r="2.5"/>
+    <circle cx="825" cy="92" r="2.8"/>
+    <circle cx="1018" cy="62" r="2.2"/>
+  </g>
+</svg>
