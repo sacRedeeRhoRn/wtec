@@ -1,0 +1,19 @@
+{
+  "name": "sio2_tap_sio2_small",
+  "material": "TaP",
+  "structure_file": "examples/sio2_tap_sio2_small/sio2_tap_sio2_trilayer.cif",
+  "run_dir": "examples/sio2_tap_sio2_small/runs",
+  "n_nodes": 1,
+  "kpoints_scf": [1, 1, 1],
+  "kpoints_nscf": [1, 1, 1],
+  "qe_noncolin": false,
+  "qe_lspinorb": false,
+  "thicknesses": [3],
+  "disorder_strengths": [0.0],
+  "n_ensemble": 1,
+  "n_jobs": 1,
+  "mfp_n_layers_z": 3,
+  "mfp_lengths": [3],
+  "lead_onsite_eV": 0.0,
+  "base_seed": 0
+}

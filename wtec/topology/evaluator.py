@@ -1,0 +1,235 @@
+"""Point-wise topology evaluation used by local and worker backends."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from wtec.topology.arc_scan import compute_arc_connectivity
+from wtec.topology.node_scan import scan_weyl_nodes
+from wtec.topology.validation import validate_wannier_model
+from wtec.wannier.model import WannierTBModel
+
+
+def _load_tb_model(
+    hr_dat_path: str,
+    *,
+    win_path: str | None = None,
+    cache: dict[str, WannierTBModel] | None = None,
+) -> WannierTBModel:
+    key = f"{Path(hr_dat_path).resolve()}::{Path(win_path).resolve() if win_path else ''}"
+    if cache is not None and key in cache:
+        return cache[key]
+    model = WannierTBModel.from_hr_dat(hr_dat_path, win_path=win_path)
+    if cache is not None:
+        cache[key] = model
+    return model
+
+
+def _node_signature(node_scan: dict[str, Any]) -> dict[str, Any]:
+    nodes = node_scan.get("nodes", [])
+    if not isinstance(nodes, list) or not nodes:
+        return {
+            "n_nodes": 0,
+            "mean_abs_energy_ev": None,
+            "mean_gap_ev": None,
+            "chirality_balance": None,
+        }
+    energies = [abs(float(n.get("energy_rel_fermi_ev", 0.0))) for n in nodes]
+    gaps = [float(n.get("gap_ev", 0.0)) for n in nodes]
+    chir = [n.get("chirality") for n in nodes if n.get("chirality") is not None]
+    balance = float(sum(int(c) for c in chir)) if chir else None
+    return {
+        "n_nodes": int(len(nodes)),
+        "mean_abs_energy_ev": float(np.mean(energies)) if energies else None,
+        "mean_gap_ev": float(np.mean(gaps)) if gaps else None,
+        "chirality_balance": balance,
+    }
+
+
+def _compute_transport_probe(
+    model: WannierTBModel,
+    *,
+    thickness_uc: int,
+    fermi_ev: float,
+    n_layers_x: int,
+    n_layers_y: int,
+    lead_axis: str,
+    thickness_axis: str,
+    n_ensemble: int,
+    disorder_strength: float,
+    energy_shift_ev: float,
+) -> dict[str, Any]:
+    from wtec.transport.conductance import compute_conductance_vs_thickness
+
+    out = compute_conductance_vs_thickness(
+        model,
+        [int(thickness_uc)],
+        disorder_strength=float(disorder_strength),
+        n_ensemble=max(1, int(n_ensemble)),
+        energy=float(fermi_ev) + float(energy_shift_ev),
+        n_jobs=1,
+        lead_axis=str(lead_axis),
+        thickness_axis=str(thickness_axis),
+        n_layers_x=int(n_layers_x),
+        n_layers_y=int(n_layers_y),
+    )
+    g = float(np.asarray(out.get("G_mean", [np.nan]), dtype=float)[0])
+    rho = float(np.asarray(out.get("rho_mean", [np.nan]), dtype=float)[0])
+    if not np.isfinite(g) or not np.isfinite(rho):
+        return {
+            "status": "failed",
+            "reason": "non_finite_transport_probe",
+            "G_e2_over_h": g,
+            "rho_ohm_m": rho,
+        }
+    return {
+        "status": "ok",
+        "G_e2_over_h": g,
+        "rho_ohm_m": rho,
+        "lead_axis": str(lead_axis),
+        "thickness_axis": str(thickness_axis),
+    }
+
+
+def evaluate_topology_point(
+    task: dict[str, Any],
+    *,
+    cache: dict[str, WannierTBModel] | None = None,
+    run_validation: bool = True,
+    run_node: bool = True,
+    run_arc: bool = True,
+    comm=None,
+) -> dict[str, Any]:
+    """Evaluate one (variant, thickness) topology point."""
+    hr_dat_path = str(task["hr_dat_path"])
+    win_path = task.get("win_path")
+    fermi_ev = float(task.get("fermi_ev", 0.0))
+    thickness_uc = int(task["thickness_uc"])
+    n_layers_y = int(task.get("n_layers_y", 4))
+    n_layers_x = int(task.get("n_layers_x", 4))
+    lead_axis = str(task.get("lead_axis", "x"))
+    transport_probe_enabled = bool(task.get("transport_probe_enabled", False))
+    point_index = task.get("point_index")
+    point_name = task.get("point_name")
+
+    model = _load_tb_model(hr_dat_path, win_path=win_path, cache=cache)
+
+    validation: dict[str, Any]
+    if run_validation:
+        validation = validate_wannier_model(
+            model,
+            fermi_ev=fermi_ev,
+            reference_bands_path=task.get("reference_bands_path"),
+            reference_tol_ev=float(task.get("reference_tol_ev", 0.20)),
+        )
+    else:
+        validation = {"status": "skipped"}
+
+    if run_validation and validation.get("status") == "fail":
+        return {
+            "status": "failed",
+            "reason": f"validation_failed:{validation.get('reason', 'unknown')}",
+            "point_index": point_index,
+            "point_name": point_name,
+            "validation": validation,
+            "thickness_uc": thickness_uc,
+            "variant_id": task.get("variant_id"),
+        }
+
+    if run_node:
+        nodes = scan_weyl_nodes(
+            model,
+            coarse_kmesh=tuple(task.get("coarse_kmesh", [20, 20, 20])),
+            refine_kmesh=tuple(task.get("refine_kmesh", [5, 5, 5])),
+            gap_threshold_ev=float(task.get("gap_threshold_ev", 0.05)),
+            max_candidates=int(task.get("max_candidates", 64)),
+            dedup_tol=float(task.get("dedup_tol", 0.04)),
+            fermi_ev=fermi_ev,
+            newton_max_iter=int(task.get("newton_max_iter", 50)),
+            node_method=str(task.get("node_method", "wannierberri_flux")),
+            comm=comm,
+        )
+    else:
+        nodes = {
+            "status": "skipped",
+            "nodes": [],
+            "n_nodes": 0,
+        }
+
+    if run_arc:
+        arc = compute_arc_connectivity(
+            model,
+            thickness_uc=thickness_uc,
+            energy_ev=fermi_ev + float(task.get("energy_shift_ev", 0.0)),
+            n_layers_x=n_layers_x,
+            n_layers_y=n_layers_y,
+            lead_axis=lead_axis,
+            prefer_engine=str(task.get("arc_engine", "siesta_slab_ldos")),
+            hr_dat_path=hr_dat_path,
+            siesta_slab_ldos_json=(
+                str(task.get("siesta_slab_ldos_json"))
+                if task.get("siesta_slab_ldos_json")
+                else None
+            ),
+            allow_proxy_fallback=bool(task.get("arc_allow_proxy_fallback", False)),
+        )
+    else:
+        arc = {
+            "status": "skipped",
+            "reason": "arc_not_run_in_this_phase",
+            "engine": "none",
+        }
+
+    if transport_probe_enabled:
+        try:
+            transport_probe = _compute_transport_probe(
+                model,
+                thickness_uc=thickness_uc,
+                fermi_ev=fermi_ev,
+                n_layers_x=n_layers_x,
+                n_layers_y=n_layers_y,
+                lead_axis=lead_axis,
+                thickness_axis=str(task.get("transport_thickness_axis", "z")),
+                n_ensemble=int(task.get("transport_probe_n_ensemble", 1)),
+                disorder_strength=float(task.get("transport_probe_disorder_strength", 0.0)),
+                energy_shift_ev=float(task.get("transport_probe_energy_shift_ev", 0.0)),
+            )
+        except Exception as exc:
+            transport_probe = {
+                "status": "failed",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }
+    else:
+        transport_probe = {
+            "status": "skipped",
+            "reason": "transport_probe_disabled",
+        }
+
+    failures: list[str] = []
+    if run_node and str(nodes.get("status", "")).lower() != "ok":
+        failures.append(f"node_scan:{nodes.get('reason', nodes.get('status'))}")
+    if run_arc and str(arc.get("status", "")).lower() != "ok":
+        failures.append(f"arc_scan:{arc.get('reason', arc.get('status'))}")
+    point_status = "ok" if not failures else "partial"
+    point_reason = "; ".join(str(v) for v in failures) if failures else None
+
+    return {
+        "status": point_status,
+        "reason": point_reason,
+        "point_index": point_index,
+        "point_name": point_name,
+        "thickness_uc": thickness_uc,
+        "variant_id": task.get("variant_id"),
+        "defect_severity": float(task.get("defect_severity", 0.0)),
+        "node_method": str(task.get("node_method", "wannierberri_flux")),
+        "node_method_requested": str(task.get("node_method", "wannierberri_flux")),
+        "arc_engine_requested": str(task.get("arc_engine", "siesta_slab_ldos")),
+        "validation": validation,
+        "node_scan": nodes,
+        "arc_scan": arc,
+        "transport_probe": transport_probe,
+        "node_signature": _node_signature(nodes) if run_node else None,
+    }

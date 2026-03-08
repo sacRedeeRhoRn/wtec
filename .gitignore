@@ -1,0 +1,32 @@
+# Secrets / local env
+.env
+
+# Virtual envs
+.venv/
+.venv_verify/
+
+# Python cache/build
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+
+# Local tooling state
+.serena/
+.claude/
+
+# Packaging artifacts
+*.egg-info/
+build/
+dist/
+
+# Local/generated workflow artifacts
+remote_runs/
+runs/
+slab_outputs/
+slab_variants/
+benchmarks/
+
+# Logs and temp
+*.log
+=0.43

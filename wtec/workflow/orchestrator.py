@@ -1,0 +1,2029 @@
+"""High-level workflow orchestrator with checkpoint/resume state machine.
+
+States: INIT → STRUCTURE → DFT_SCF → DFT_NSCF → WANNIER90 → TRANSPORT → ANALYSIS → DONE
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import time
+from pathlib import Path
+import shlex
+import zipfile
+from typing import Any
+
+import numpy as np
+
+
+STAGES = [
+    "INIT",
+    "STRUCTURE",
+    "DFT_SCF",
+    "DFT_NSCF",
+    "WANNIER90",
+    "TRANSPORT",
+    "ANALYSIS",
+    "DONE",
+]
+
+
+class TopoSlabWorkflow:
+    """End-to-end workflow with checkpoint/resume support."""
+
+    def __init__(
+        self,
+        config: dict,
+        job_manager=None,
+        *,
+        checkpoint_file: Path | None = None,
+    ) -> None:
+        self.cfg = config
+        self.jm = job_manager
+        self._state: dict[str, Any] = {"stage": "INIT", "outputs": {}}
+        self._checkpoint_file = checkpoint_file or (
+            Path.home() / ".wtec" / "checkpoints" / f"{config.get('name', 'run')}.json"
+        )
+
+    # ── constructors ─────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_config(cls, config: dict) -> "TopoSlabWorkflow":
+        """Build from a config dict (loaded from JSON)."""
+        # We can't keep the SSH connection open indefinitely; open per-job.
+        # Pass None as job_manager; each stage will open its own connection.
+        return cls(config, job_manager=None)
+
+    # ── state machine ─────────────────────────────────────────────────────────
+
+    def run_full(self) -> dict:
+        """Run all stages in sequence."""
+        self._advance_to("INIT")
+        atoms = self._stage_structure()
+        hr_direct = self._resolve_hr_dat_from_cfg_or_state()
+        if hr_direct is not None:
+            print(
+                "[Orchestrator] Using configured hr_dat_path; skipping "
+                "DFT_SCF/DFT_NSCF/WANNIER90."
+            )
+            self._state["outputs"]["dft_jobs"] = {
+                "scf": {
+                    "job_id": None,
+                    "status": "SKIPPED",
+                    "reason": "configured_hr_dat_path",
+                },
+                "nscf": {
+                    "job_id": None,
+                    "status": "SKIPPED",
+                    "reason": "configured_hr_dat_path",
+                },
+            }
+            self._state["outputs"]["wannier_job"] = {
+                "job_id": None,
+                "status": "SKIPPED",
+                "reason": "configured_hr_dat_path",
+            }
+            self._state["outputs"]["hr_dat"] = str(Path(hr_direct).resolve())
+            self._state["outputs"]["dft_reuse_mode"] = self._dft_reuse_mode()
+            self._save_checkpoint()
+            hr_dat = Path(hr_direct)
+        else:
+            fermi_ev = self._stage_dft(atoms)
+            hr_dat = self._stage_wannier90(atoms, fermi_ev)
+        transport_results = self._stage_transport(hr_dat)
+        analysis_results = self._stage_analysis(transport_results, hr_dat=hr_dat)
+        self._set_stage("DONE")
+        self._save_checkpoint()
+        return {"transport": transport_results, "analysis": analysis_results}
+
+    def run_stage(self, stage: str) -> dict:
+        """Run only the specified stage, using checkpoint outputs for prior stages."""
+        self._load_checkpoint()
+        stage_upper = stage.upper().replace("-", "_")
+        aliases = {
+            "DFT": "DFT_NSCF",
+        }
+        stage_upper = aliases.get(stage_upper, stage_upper)
+        valid = set(STAGES) | {"DFT"}
+        if stage_upper not in valid:
+            raise ValueError(f"Unknown stage: {stage!r}. Valid: {sorted(valid)}")
+
+        if stage_upper == "INIT":
+            self._advance_to("INIT")
+            return {"stage": "INIT"}
+
+        if stage_upper == "STRUCTURE":
+            atoms = self._stage_structure()
+            return {"structure_atoms": len(atoms)}
+
+        # Transport/analysis can run directly from explicit hr_dat_path (config)
+        # or from checkpointed hr_dat, without forcing DFT/Wannier stages.
+        if stage_upper in {"TRANSPORT", "ANALYSIS"}:
+            hr_direct = self._resolve_hr_dat_from_cfg_or_state()
+            if hr_direct is not None:
+                self._state["outputs"]["hr_dat"] = str(hr_direct)
+                self._save_checkpoint()
+                if stage_upper == "TRANSPORT":
+                    results = self._stage_transport(hr_direct)
+                    return {"transport": results}
+                transport_results = self._stage_transport(hr_direct)
+                analysis = self._stage_analysis(transport_results, hr_dat=hr_direct)
+                return {"analysis": analysis}
+
+        atoms = self._build_atoms_from_config()
+        if stage_upper in {"DFT_SCF", "DFT_NSCF"}:
+            fermi_ev = self._stage_dft(atoms)
+            return {"fermi_ev": fermi_ev}
+
+        fermi_ev = self._state["outputs"].get("fermi_ev")
+        if fermi_ev is None:
+            fermi_ev = self._stage_dft(atoms)
+
+        if stage_upper == "WANNIER90":
+            hr_dat = self._stage_wannier90(atoms, float(fermi_ev))
+            return {"hr_dat": str(hr_dat)}
+
+        hr_dat_str = self._state["outputs"].get("hr_dat")
+        hr_dat = Path(hr_dat_str) if hr_dat_str else None
+        if hr_dat is None or not hr_dat.exists():
+            hr_dat = self._stage_wannier90(atoms, float(fermi_ev))
+
+        if stage_upper == "TRANSPORT":
+            results = self._stage_transport(hr_dat)
+            return {"transport": results}
+
+        if stage_upper == "ANALYSIS":
+            transport_results = self._stage_transport(hr_dat)
+            analysis = self._stage_analysis(transport_results, hr_dat=hr_dat)
+            return {"analysis": analysis}
+
+        if stage_upper == "DONE":
+            out = self.run_full()
+            self._set_stage("DONE")
+            self._save_checkpoint()
+            return out
+
+        raise ValueError(f"Unhandled stage: {stage!r}")
+
+    def resume(self) -> dict:
+        """Resume from last saved checkpoint."""
+        self._load_checkpoint()
+        current = self._state.get("stage", "INIT")
+        if current not in STAGES:
+            current = "INIT"
+        idx = STAGES.index(current)
+        print(f"[Orchestrator] Resuming from stage {current} ({idx}/{len(STAGES)-1})")
+        if current == "DONE":
+            return {"status": "DONE", "outputs": self._state.get("outputs", {})}
+
+        fermi_ev = self._state.get("outputs", {}).get("fermi_ev")
+        hr_dat = self._resolve_hr_dat_from_cfg_or_state()
+
+        if current in {"INIT", "STRUCTURE", "DFT_SCF", "DFT_NSCF"}:
+            atoms = self._build_atoms_from_config()
+            fermi_ev = self._stage_dft(atoms)
+            hr_dat = self._stage_wannier90(atoms, float(fermi_ev))
+        elif current == "WANNIER90":
+            atoms = self._build_atoms_from_config()
+            if fermi_ev is None:
+                fermi_ev = self._stage_dft(atoms)
+            hr_dat = self._stage_wannier90(atoms, float(fermi_ev))
+        elif current in {"TRANSPORT", "ANALYSIS"}:
+            if hr_dat is None:
+                atoms = self._build_atoms_from_config()
+                if fermi_ev is None:
+                    fermi_ev = self._stage_dft(atoms)
+                hr_dat = self._stage_wannier90(atoms, float(fermi_ev))
+        else:
+            return self.run_full()
+
+        if hr_dat is None:
+            raise FileNotFoundError(
+                "Could not resolve hr_dat for resume. Provide cfg['hr_dat_path'] "
+                "or ensure checkpoint output exists."
+            )
+        transport_results = self._stage_transport(hr_dat)
+        analysis_results = self._stage_analysis(transport_results, hr_dat=hr_dat)
+        self._set_stage("DONE")
+        self._save_checkpoint()
+        return {"transport": transport_results, "analysis": analysis_results}
+
+    def status(self) -> dict:
+        self._load_checkpoint()
+        return {
+            "stage": self._state["stage"],
+            "outputs": list(self._state["outputs"].keys()),
+        }
+
+    # ── stages ────────────────────────────────────────────────────────────────
+
+    def _stage_structure(self):
+        self._set_stage("STRUCTURE")
+        struct_file = self.cfg["structure_file"]
+        atoms = self._build_atoms_from_config()
+
+        self._state["outputs"]["structure"] = str(struct_file)
+        self._save_checkpoint()
+        return atoms
+
+    def _dft_engine(self) -> str:
+        mode_raw = self.cfg.get("dft_mode")
+        if mode_raw is None and isinstance(self.cfg.get("dft"), dict):
+            mode_raw = self.cfg["dft"].get("mode")
+        mode = str(mode_raw or "legacy_single").strip().lower() or "legacy_single"
+
+        # Hybrid mode: this orchestrator DFT stage is the reference track.
+        if mode == "hybrid_qe_ref_siesta_variants":
+            raw = self.cfg.get("dft_reference_engine")
+            if raw is None and isinstance(self.cfg.get("dft"), dict):
+                raw = (self.cfg["dft"].get("reference") or {}).get("engine")
+            if raw is None:
+                raw = "qe"
+        elif mode == "dual_family":
+            raw = self.cfg.get("dft_pes_engine")
+            if raw is None and isinstance(self.cfg.get("dft"), dict):
+                tracks = self.cfg["dft"].get("tracks")
+                if isinstance(tracks, dict):
+                    pes = tracks.get("pes_reference")
+                    if isinstance(pes, dict):
+                        raw = pes.get("engine")
+            if raw is None:
+                raw = self.cfg.get("dft_reference_engine")
+            if raw is None:
+                raw = "qe"
+        else:
+            raw = self.cfg.get("dft_engine")
+            if raw is None and isinstance(self.cfg.get("dft"), dict):
+                raw = self.cfg["dft"].get("engine")
+
+        engine = str(raw or "qe").strip().lower() or "qe"
+        if engine not in {"qe", "siesta", "vasp"}:
+            raise ValueError(f"Unsupported dft_engine={engine!r}. Use 'qe', 'siesta', or 'vasp'.")
+        return engine
+
+    def _dft_reuse_mode(self) -> str:
+        raw = self.cfg.get("dft_reuse_mode")
+        if raw is None and isinstance(self.cfg.get("dft"), dict):
+            raw = self.cfg["dft"].get("reuse_mode")
+        mode = str(raw or "all").strip().lower() or "all"
+        allowed = {"none", "pristine-only", "all"}
+        if mode not in allowed:
+            raise ValueError(f"Unsupported dft.reuse_mode={mode!r}. Use one of {sorted(allowed)}.")
+        return mode
+
+    def _dft_mode(self) -> str:
+        raw = self.cfg.get("dft_mode")
+        if raw is None and isinstance(self.cfg.get("dft"), dict):
+            raw = self.cfg["dft"].get("mode")
+        mode = str(raw or "legacy_single").strip().lower() or "legacy_single"
+        allowed = {"legacy_single", "hybrid_qe_ref_siesta_variants", "dual_family"}
+        if mode not in allowed:
+            raise ValueError(f"Unsupported dft_mode={mode!r}. Use one of {sorted(allowed)}.")
+        return mode
+
+    def _variant_dft_engine(self) -> str:
+        if self._dft_mode() == "dual_family":
+            raw = self.cfg.get("dft_lcao_engine")
+            if raw is None and isinstance(self.cfg.get("dft"), dict):
+                tracks = self.cfg["dft"].get("tracks")
+                if isinstance(tracks, dict):
+                    lcao = tracks.get("lcao_upscaled")
+                    if isinstance(lcao, dict):
+                        raw = lcao.get("engine")
+        else:
+            raw = self.cfg.get("topology_variant_dft_engine")
+        if raw is None and isinstance(self.cfg.get("topology"), dict):
+            raw = self.cfg["topology"].get("variant_dft_engine")
+        if raw is None and self._dft_mode() == "hybrid_qe_ref_siesta_variants":
+            raw = "siesta"
+        if raw is None:
+            raw = self._dft_engine()
+        engine = str(raw or "siesta").strip().lower() or "siesta"
+        if engine not in {"qe", "siesta", "abacus"}:
+            raise ValueError(
+                f"Unsupported topology variant dft_engine={engine!r}. Use 'qe', 'siesta', or 'abacus'."
+            )
+        return engine
+
+    def _pes_reference_structure_path(self) -> Path | None:
+        raw = self.cfg.get("dft_pes_reference_structure_file")
+        if raw is None and isinstance(self.cfg.get("dft"), dict):
+            tracks = self.cfg["dft"].get("tracks")
+            if isinstance(tracks, dict):
+                pes = tracks.get("pes_reference")
+                if isinstance(pes, dict):
+                    raw = pes.get("structure_file")
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        return Path(raw).expanduser().resolve()
+
+    def _reference_atoms(self, fallback_atoms):
+        ref_path = self._pes_reference_structure_path()
+        if ref_path is None:
+            if self._dft_mode() == "dual_family":
+                raise ValueError(
+                    "dual_family mode requires dft_pes_reference_structure_file for PES reference track."
+                )
+            return fallback_atoms
+        if not ref_path.exists():
+            raise FileNotFoundError(f"dft_pes_reference_structure_file not found: {ref_path}")
+        if ref_path.stat().st_size == 0:
+            raise ValueError(f"dft_pes_reference_structure_file is empty: {ref_path}")
+        import ase.io
+
+        return ase.io.read(str(ref_path))
+
+    def _dft_siesta_cfg(self) -> dict[str, Any]:
+        flat = self.cfg.get("dft_siesta", {})
+        nested = self.cfg.get("dft", {}).get("siesta") if isinstance(self.cfg.get("dft"), dict) else {}
+        out: dict[str, Any] = {}
+        if isinstance(nested, dict):
+            out.update(nested)
+        if isinstance(flat, dict):
+            out.update(flat)
+        if out:
+            return out
+        return {}
+
+    def _dft_vasp_cfg(self) -> dict[str, Any]:
+        flat = self.cfg.get("dft_vasp", {})
+        nested = self.cfg.get("dft", {}).get("vasp") if isinstance(self.cfg.get("dft"), dict) else {}
+        out: dict[str, Any] = {}
+        if isinstance(nested, dict):
+            out.update(nested)
+        if isinstance(flat, dict):
+            out.update(flat)
+        if out:
+            return out
+        return {}
+
+    def _dft_abacus_cfg(self) -> dict[str, Any]:
+        flat = self.cfg.get("dft_abacus", {})
+        nested = self.cfg.get("dft", {}).get("abacus") if isinstance(self.cfg.get("dft"), dict) else {}
+        out: dict[str, Any] = {}
+        if isinstance(nested, dict):
+            out.update(nested)
+        if isinstance(flat, dict):
+            out.update(flat)
+        if out:
+            return out
+        return {}
+
+    def _dft_dispersion_cfg(self) -> dict[str, Any]:
+        flat = self.cfg.get("dft_dispersion", {})
+        nested = self.cfg.get("dft", {}).get("dispersion") if isinstance(self.cfg.get("dft"), dict) else {}
+        out: dict[str, Any] = {
+            "enabled": True,
+            "method": "d3",
+            "qe_vdw_corr": "grimme-d3",
+            "qe_dftd3_version": 4,
+            "qe_dftd3_threebody": True,
+            "siesta_dftd3_use_xc_defaults": True,
+        }
+        if isinstance(nested, dict):
+            out.update(nested)
+        if isinstance(flat, dict):
+            out.update(flat)
+        return out
+
+    def _reference_reuse_policy(self) -> str:
+        raw = self.cfg.get("dft_reference_reuse_policy")
+        if raw is None and isinstance(self.cfg.get("dft"), dict):
+            ref = self.cfg["dft"].get("reference")
+            if isinstance(ref, dict):
+                raw = ref.get("reuse_policy")
+        policy = str(raw or "strict_hash").strip().lower() or "strict_hash"
+        if policy not in {"strict_hash", "timestamp_only"}:
+            raise ValueError(
+                "dft.reference.reuse_policy must be 'strict_hash' or 'timestamp_only'."
+            )
+        return policy
+
+    @staticmethod
+    def _sha1_file(path: Path) -> str:
+        h = hashlib.sha1()
+        with path.open("rb") as f:
+            while True:
+                chunk = f.read(1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _qe_reference_manifest_path(self, run_dir: Path) -> Path:
+        return run_dir / "qe_reference_manifest.json"
+
+    def _qe_reference_fingerprint(self, run_dir: Path) -> dict[str, Any]:
+        structure_path = self._pes_reference_structure_path()
+        if structure_path is None:
+            structure_path = Path(str(self.cfg.get("structure_file", ""))).expanduser()
+        structure_hash = None
+        if structure_path.exists() and structure_path.is_file():
+            structure_hash = self._sha1_file(structure_path)
+        return {
+            "material": str(self.cfg.get("material", "")),
+            "structure_file": str(structure_path.resolve()) if structure_path.exists() else str(structure_path),
+            "structure_sha1": structure_hash,
+            "kpoints_scf": list(self.cfg.get("kpoints_scf", (8, 8, 8))),
+            "kpoints_nscf": list(self.cfg.get("kpoints_nscf", (12, 12, 12))),
+            "qe_noncolin": bool(self.cfg.get("qe_noncolin", True)),
+            "qe_lspinorb": bool(self.cfg.get("qe_lspinorb", True)),
+            "qe_disable_symmetry": bool(self.cfg.get("qe_disable_symmetry", False)),
+            "dft_dispersion": self._dft_dispersion_cfg(),
+            "pseudo_dir": str(self.cfg.get("qe_pseudo_dir", "")),
+            "n_nodes": int(self.cfg.get("n_nodes", 1)),
+        }
+
+    def _load_qe_reference_manifest(self, run_dir: Path) -> dict[str, Any] | None:
+        p = self._qe_reference_manifest_path(run_dir)
+        if not p.exists() or p.stat().st_size == 0:
+            return None
+        try:
+            data = json.loads(p.read_text())
+        except Exception:
+            return None
+        if not isinstance(data, dict):
+            return None
+        return data
+
+    def _qe_reference_can_reuse(
+        self,
+        *,
+        run_dir: Path,
+        required_outputs: list[str],
+    ) -> tuple[bool, str]:
+        policy = self._reference_reuse_policy()
+        if policy == "timestamp_only":
+            for name in required_outputs:
+                p = run_dir / name
+                if not p.exists() or p.stat().st_size == 0:
+                    return False, f"missing_output:{name}"
+            return True, "timestamp_only_outputs_present"
+
+        manifest = self._load_qe_reference_manifest(run_dir)
+        if manifest is None:
+            return False, "manifest_missing"
+        current_fp = self._qe_reference_fingerprint(run_dir)
+        saved_fp = manifest.get("fingerprint")
+        if not isinstance(saved_fp, dict):
+            return False, "manifest_fingerprint_missing"
+        if saved_fp != current_fp:
+            return False, "fingerprint_mismatch"
+
+        outputs = manifest.get("outputs")
+        if not isinstance(outputs, dict):
+            return False, "manifest_outputs_missing"
+        for name in required_outputs:
+            p = run_dir / name
+            if not p.exists() or p.stat().st_size == 0:
+                return False, f"missing_output:{name}"
+            meta = outputs.get(name)
+            if not isinstance(meta, dict):
+                return False, f"manifest_output_missing:{name}"
+            expected_sha = str(meta.get("sha1", "")).strip()
+            if not expected_sha:
+                return False, f"manifest_sha_missing:{name}"
+            actual_sha = self._sha1_file(p)
+            if actual_sha != expected_sha:
+                return False, f"sha_mismatch:{name}"
+        return True, "strict_hash_match"
+
+    def _write_qe_reference_manifest(
+        self,
+        *,
+        run_dir: Path,
+        fermi_ev: float,
+    ) -> None:
+        outputs: dict[str, Any] = {}
+        for name in [
+            f"{self.cfg['material']}.scf.out",
+            f"{self.cfg['material']}.nscf.out",
+            f"{self.cfg['material']}.win",
+            f"{self.cfg['material']}.wout",
+            f"{self.cfg['material']}_hr.dat",
+        ]:
+            p = run_dir / name
+            if not p.exists() or p.stat().st_size == 0:
+                continue
+            outputs[name] = {
+                "path": str(p.resolve()),
+                "size_bytes": int(p.stat().st_size),
+                "sha1": self._sha1_file(p),
+            }
+        manifest = {
+            "fingerprint": self._qe_reference_fingerprint(run_dir),
+            "fermi_ev": float(fermi_ev),
+            "outputs": outputs,
+            "updated_at": int(time.time()),
+        }
+        self._qe_reference_manifest_path(run_dir).write_text(json.dumps(manifest, indent=2))
+
+    def _stage_dft(self, atoms) -> float:
+        self._set_stage("DFT_SCF")
+        from wtec.config.cluster import ClusterConfig
+        from wtec.cluster.ssh import open_ssh
+        from wtec.cluster.submit import JobManager
+
+        cfg = ClusterConfig.from_env()
+        run_dir = Path(self.cfg.get("run_dir", ".")) / "dft"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        atoms_ref = self._reference_atoms(atoms)
+        material = self.cfg["material"]
+        scf_out = run_dir / f"{material}.scf.out"
+        nscf_out = run_dir / f"{material}.nscf.out"
+        resume_from_existing_scf = bool(
+            self.cfg.get("resume_from_existing_scf", True)
+        )
+        engine = self._dft_engine()
+
+        if engine == "qe":
+            from wtec.workflow.dft_pipeline import DFTPipeline as PipelineClass
+            from wtec.qe.parser import parse_fermi_energy, parse_convergence
+        elif engine == "siesta":
+            from wtec.siesta.runner import SiestaPipeline as PipelineClass
+            from wtec.siesta.parser import parse_fermi_energy, parse_convergence
+        else:  # vasp
+            from wtec.vasp.runner import VaspPipeline as PipelineClass
+            from wtec.vasp.parser import parse_fermi_energy, parse_convergence
+
+        if engine == "qe" and self._dft_reuse_mode() in {"pristine-only", "all"}:
+            can_reuse, reuse_reason = self._qe_reference_can_reuse(
+                run_dir=run_dir,
+                required_outputs=[f"{material}.scf.out", f"{material}.nscf.out"],
+            )
+            if can_reuse and scf_out.exists():
+                fermi_ev = float(parse_fermi_energy(scf_out))
+                print(f"[Orchestrator] Reusing QE reference DFT ({reuse_reason}).")
+                self._state["outputs"]["fermi_ev"] = fermi_ev
+                self._state["outputs"]["dft_engine"] = engine
+                self._state["outputs"]["dft_mode"] = self._dft_mode()
+                self._state["outputs"]["dft_jobs"] = {
+                    "scf": {
+                        "job_id": None,
+                        "status": "SKIPPED",
+                        "reason": f"qe_reference_reuse:{reuse_reason}",
+                        "local_scf_out": str(scf_out),
+                    },
+                    "nscf": {
+                        "job_id": None,
+                        "status": "SKIPPED",
+                        "reason": f"qe_reference_reuse:{reuse_reason}",
+                        "local_nscf_out": str(nscf_out),
+                    },
+                }
+                self._save_checkpoint()
+                return fermi_ev
+
+        scf_meta: dict[str, Any]
+        fermi_ev: float
+
+        # Fast path: local SCF output already complete and parseable.
+        if (
+            resume_from_existing_scf
+            and scf_out.exists()
+            and scf_out.stat().st_size > 0
+            and parse_convergence(scf_out)
+        ):
+            fermi_ev = parse_fermi_energy(scf_out)
+            scf_meta = {
+                "job_id": None,
+                "status": "SKIPPED",
+                "reason": "existing_local_scf",
+                "local_scf_out": str(scf_out),
+            }
+            print(
+                f"[Orchestrator] Reusing existing SCF output, skipping SCF: {scf_out}"
+            )
+        else:
+            fermi_ev = float("nan")
+            scf_meta = {}
+
+        with open_ssh(cfg) as ssh:
+            jm = JobManager(ssh)
+            common_kwargs = {
+                "run_dir": run_dir,
+                "remote_base": self.cfg.get("remote_workdir", cfg.remote_workdir),
+                "n_nodes": self.cfg.get("n_nodes", 1),
+                "n_cores_per_node": cfg.mpi_cores,
+                "n_cores_by_queue": cfg.mpi_cores_by_queue,
+                "queue": cfg.pbs_queue,
+                "queue_priority": cfg.pbs_queue_priority,
+                "kpoints_scf": tuple(self.cfg.get("kpoints_scf", (8, 8, 8))),
+                "kpoints_nscf": tuple(self.cfg.get("kpoints_nscf", (12, 12, 12))),
+                "omp_threads": cfg.omp_threads,
+                "modules": cfg.modules,
+                "bin_dirs": cfg.bin_dirs,
+                "live_log": self.cfg.get("_runtime_live_log", True),
+                "log_poll_interval": self.cfg.get("_runtime_log_poll_interval", 5),
+                "stale_log_seconds": self.cfg.get("_runtime_stale_log_seconds", 300),
+            }
+            if engine == "qe":
+                pipeline = PipelineClass(
+                    atoms_ref,
+                    material,
+                    jm,
+                    pseudo_dir=cfg.qe_pseudo_dir,
+                    qe_noncolin=self.cfg.get("qe_noncolin", True),
+                    qe_lspinorb=self.cfg.get("qe_lspinorb", True),
+                    qe_disable_symmetry=self.cfg.get("qe_disable_symmetry", False),
+                    dispersion_cfg=self._dft_dispersion_cfg(),
+                    **common_kwargs,
+                )
+            elif engine == "siesta":
+                siesta_cfg = self._dft_siesta_cfg()
+                pipeline = PipelineClass(
+                    atoms_ref,
+                    material,
+                    jm,
+                    pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cfg.siesta_pseudo_dir),
+                    basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
+                    wannier_interface=str(siesta_cfg.get("wannier_interface", "sisl")).strip().lower(),
+                    spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                    include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                    mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
+                    mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
+                    mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
+                    omp_threads_scf=int(siesta_cfg.get("omp_threads_scf", 0)),
+                    omp_threads_nscf=int(siesta_cfg.get("omp_threads_nscf", 0)),
+                    omp_threads_wannier=int(siesta_cfg.get("omp_threads_wannier", 0)),
+                    factorization_defaults=(
+                        siesta_cfg.get("factorization_defaults", {})
+                        if isinstance(siesta_cfg.get("factorization_defaults"), dict)
+                        else {}
+                    ),
+                    dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
+                    dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                    electronic_temperature_k=float(siesta_cfg.get("electronic_temperature_k", 300.0)),
+                    max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                    dispersion_cfg=self._dft_dispersion_cfg(),
+                    **common_kwargs,
+                )
+            else:
+                vasp_cfg = self._dft_vasp_cfg()
+                pipeline = PipelineClass(
+                    atoms_ref,
+                    material,
+                    jm,
+                    pseudo_dir=str(vasp_cfg.get("pseudo_dir") or cfg.vasp_pseudo_dir),
+                    executable=str(vasp_cfg.get("executable", "vasp_std")).strip() or "vasp_std",
+                    encut_ev=float(vasp_cfg.get("encut_ev", 520.0)),
+                    ediff=float(vasp_cfg.get("ediff", 1e-6)),
+                    ismear=int(vasp_cfg.get("ismear", 0)),
+                    sigma=float(vasp_cfg.get("sigma", 0.05)),
+                    disable_symmetry=bool(
+                        vasp_cfg.get(
+                            "disable_symmetry",
+                            self.cfg.get("qe_disable_symmetry", True),
+                        )
+                    ),
+                    **common_kwargs,
+                )
+            if not scf_meta:
+                remote_dir = f"{pipeline.remote_base}/{material}"
+                remote_scf_out = f"{remote_dir.rstrip('/')}/{material}.scf.out"
+                # Resume path: detect finished SCF on cluster even if local output was cleared.
+                check_remote = f"test -s {shlex.quote(remote_scf_out)}"
+                rc, _, _ = ssh.run(check_remote, check=False)
+                if resume_from_existing_scf and rc == 0:
+                    jm.retrieve(
+                        remote_dir,
+                        run_dir,
+                        [f"{material}.scf.out", f"scf_{material}.log"],
+                    )
+                    if not scf_out.exists():
+                        raise FileNotFoundError(
+                            f"SCF output was detected remotely but not retrieved to {scf_out}"
+                        )
+                    if parse_convergence(scf_out):
+                        fermi_ev = parse_fermi_energy(scf_out)
+                        scf_meta = {
+                            "job_id": None,
+                            "status": "SKIPPED",
+                            "reason": "existing_remote_scf",
+                            "remote_scf_out": remote_scf_out,
+                            "local_scf_out": str(scf_out),
+                        }
+                        print(
+                            "[Orchestrator] Reusing completed remote SCF output, skipping SCF."
+                        )
+                    else:
+                        scf_meta = pipeline.run_scf()
+                        fermi_ev = parse_fermi_energy(scf_out)
+                else:
+                    scf_meta = pipeline.run_scf()
+                    fermi_ev = parse_fermi_energy(scf_out)
+
+            self._set_stage("DFT_NSCF")
+            nscf_meta = pipeline.run_nscf(fermi_ev)
+
+        self._state["outputs"]["fermi_ev"] = fermi_ev
+        if self._dft_mode() == "hybrid_qe_ref_siesta_variants" and engine == "qe":
+            self._state["outputs"]["fermi_ev_pristine_qe"] = float(fermi_ev)
+        self._state["outputs"]["dft_engine"] = engine
+        self._state["outputs"]["dft_mode"] = self._dft_mode()
+        self._state["outputs"]["dft_reuse_mode"] = self._dft_reuse_mode()
+        self._state["outputs"]["dft_jobs"] = {
+            "scf": scf_meta,
+            "nscf": nscf_meta,
+        }
+        self._state["last_job_id"] = nscf_meta.get("job_id")
+        self._save_checkpoint()
+        return fermi_ev
+
+    def _stage_wannier90(self, atoms, fermi_ev: float) -> Path:
+        self._set_stage("WANNIER90")
+        from wtec.config.cluster import ClusterConfig
+        from wtec.cluster.ssh import open_ssh
+        from wtec.cluster.submit import JobManager
+
+        cfg = ClusterConfig.from_env()
+        run_dir = Path(self.cfg.get("run_dir", ".")) / "dft"
+        atoms_ref = self._reference_atoms(atoms)
+        engine = self._dft_engine()
+        material = self.cfg["material"]
+        hr_dat = run_dir / f"{material}_hr.dat"
+        win_file = run_dir / f"{material}.win"
+        wout_file = run_dir / f"{material}.wout"
+
+        if engine == "qe" and self._dft_reuse_mode() in {"pristine-only", "all"}:
+            can_reuse, reuse_reason = self._qe_reference_can_reuse(
+                run_dir=run_dir,
+                required_outputs=[
+                    f"{material}.scf.out",
+                    f"{material}.nscf.out",
+                    f"{material}.win",
+                    f"{material}.wout",
+                    f"{material}_hr.dat",
+                ],
+            )
+            if can_reuse and hr_dat.exists() and win_file.exists() and wout_file.exists():
+                print(f"[Orchestrator] Reusing QE reference Wannier outputs ({reuse_reason}).")
+                wan_meta = {
+                    "job_id": None,
+                    "status": "SKIPPED",
+                    "reason": f"qe_reference_reuse:{reuse_reason}",
+                    "local_hr_dat": str(hr_dat),
+                }
+                self._state["outputs"]["hr_dat"] = str(hr_dat)
+                self._state["outputs"]["wannier_job"] = wan_meta
+                self._state["outputs"]["dft_engine"] = engine
+                self._state["outputs"]["dft_mode"] = self._dft_mode()
+                self._save_checkpoint()
+                return hr_dat
+
+        with open_ssh(cfg) as ssh:
+            jm = JobManager(ssh)
+            common_kwargs = {
+                "run_dir": run_dir,
+                "remote_base": self.cfg.get("remote_workdir", cfg.remote_workdir),
+                "n_nodes": self.cfg.get("n_nodes", 1),
+                "n_cores_per_node": cfg.mpi_cores,
+                "n_cores_by_queue": cfg.mpi_cores_by_queue,
+                "queue": cfg.pbs_queue,
+                "queue_priority": cfg.pbs_queue_priority,
+                "kpoints_scf": tuple(self.cfg.get("kpoints_scf", (8, 8, 8))),
+                "kpoints_nscf": tuple(self.cfg.get("kpoints_nscf", (12, 12, 12))),
+                "omp_threads": cfg.omp_threads,
+                "modules": cfg.modules,
+                "bin_dirs": cfg.bin_dirs,
+                "live_log": self.cfg.get("_runtime_live_log", True),
+                "log_poll_interval": self.cfg.get("_runtime_log_poll_interval", 5),
+                "stale_log_seconds": self.cfg.get("_runtime_stale_log_seconds", 300),
+            }
+            if engine == "qe":
+                from wtec.workflow.dft_pipeline import DFTPipeline as PipelineClass
+
+                pipeline = PipelineClass(
+                    atoms_ref,
+                    material,
+                    jm,
+                    pseudo_dir=cfg.qe_pseudo_dir,
+                    qe_noncolin=self.cfg.get("qe_noncolin", True),
+                    qe_lspinorb=self.cfg.get("qe_lspinorb", True),
+                    qe_disable_symmetry=self.cfg.get("qe_disable_symmetry", False),
+                    dispersion_cfg=self._dft_dispersion_cfg(),
+                    **common_kwargs,
+                )
+            elif engine == "siesta":
+                from wtec.siesta.runner import SiestaPipeline as PipelineClass
+
+                siesta_cfg = self._dft_siesta_cfg()
+                pipeline = PipelineClass(
+                    atoms_ref,
+                    material,
+                    jm,
+                    pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cfg.siesta_pseudo_dir),
+                    basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
+                    wannier_interface=str(siesta_cfg.get("wannier_interface", "sisl")).strip().lower(),
+                    spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                    include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                    mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
+                    mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
+                    mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
+                    omp_threads_scf=int(siesta_cfg.get("omp_threads_scf", 0)),
+                    omp_threads_nscf=int(siesta_cfg.get("omp_threads_nscf", 0)),
+                    omp_threads_wannier=int(siesta_cfg.get("omp_threads_wannier", 0)),
+                    factorization_defaults=(
+                        siesta_cfg.get("factorization_defaults", {})
+                        if isinstance(siesta_cfg.get("factorization_defaults"), dict)
+                        else {}
+                    ),
+                    dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
+                    dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                    electronic_temperature_k=float(siesta_cfg.get("electronic_temperature_k", 300.0)),
+                    max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                    dispersion_cfg=self._dft_dispersion_cfg(),
+                    **common_kwargs,
+                )
+            else:
+                from wtec.vasp.runner import VaspPipeline as PipelineClass
+
+                vasp_cfg = self._dft_vasp_cfg()
+                pipeline = PipelineClass(
+                    atoms_ref,
+                    material,
+                    jm,
+                    pseudo_dir=str(vasp_cfg.get("pseudo_dir") or cfg.vasp_pseudo_dir),
+                    executable=str(vasp_cfg.get("executable", "vasp_std")).strip() or "vasp_std",
+                    encut_ev=float(vasp_cfg.get("encut_ev", 520.0)),
+                    ediff=float(vasp_cfg.get("ediff", 1e-6)),
+                    ismear=int(vasp_cfg.get("ismear", 0)),
+                    sigma=float(vasp_cfg.get("sigma", 0.05)),
+                    disable_symmetry=bool(
+                        vasp_cfg.get(
+                            "disable_symmetry",
+                            self.cfg.get("qe_disable_symmetry", True),
+                        )
+                    ),
+                    **common_kwargs,
+                )
+            wan_meta = pipeline.run_wannier(fermi_ev)
+
+        self._state["outputs"]["hr_dat"] = str(hr_dat)
+        self._state["outputs"]["wannier_job"] = wan_meta
+        self._state["outputs"]["dft_engine"] = engine
+        self._state["outputs"]["dft_mode"] = self._dft_mode()
+        self._state["outputs"]["dft_reuse_mode"] = self._dft_reuse_mode()
+        self._state["last_job_id"] = wan_meta.get("job_id")
+        if engine == "qe":
+            self._write_qe_reference_manifest(run_dir=run_dir, fermi_ev=float(fermi_ev))
+        self._save_checkpoint()
+        return hr_dat
+
+    def _stage_transport(self, hr_dat: Path) -> dict:
+        self._set_stage("TRANSPORT")
+        cached = self._load_cached_transport_results()
+        if cached is not None:
+            print(
+                "[Orchestrator] Reusing cached transport result: "
+                f"{self._transport_result_file()}"
+            )
+            self._state["outputs"]["transport_results"] = "computed"
+            self._state["outputs"]["transport_job"] = {
+                "status": "REUSED",
+                "backend": "cached_result",
+                "result_file": str(self._transport_result_file()),
+            }
+            self._save_checkpoint()
+            return cached
+
+        backend = str(self.cfg.get("transport_backend", "qsub")).strip().lower()
+        strict_qsub = bool(self.cfg.get("transport_strict_qsub", True))
+        job_meta: dict[str, Any] | None = None
+
+        if backend == "qsub":
+            try:
+                results, job_meta = self._stage_transport_qsub(hr_dat, label="primary")
+            except Exception as exc:
+                if strict_qsub:
+                    raise
+                print(
+                    "[Orchestrator] transport qsub failed; "
+                    f"falling back to local: {type(exc).__name__}: {exc}"
+                )
+                results = self._stage_transport_local(hr_dat, label="primary")
+                job_meta = {
+                    "status": "LOCAL_FALLBACK",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "backend": "local",
+                }
+        elif backend == "local":
+            results = self._stage_transport_local(hr_dat, label="primary")
+            job_meta = {"status": "LOCAL", "backend": "local"}
+        else:
+            raise ValueError(
+                f"Unknown transport_backend={backend!r}. Use 'qsub' or 'local'."
+            )
+
+        self._state["outputs"]["transport_results"] = "computed"
+        if job_meta is not None:
+            self._state["outputs"]["transport_job"] = job_meta
+            if job_meta.get("job_id"):
+                self._state["last_job_id"] = job_meta.get("job_id")
+        self._save_checkpoint()
+        return results
+
+    def _stage_transport_local(self, hr_dat: Path, *, label: str = "primary") -> dict:
+        from wtec.workflow.transport_pipeline import TransportPipeline
+
+        tp = TransportPipeline(
+            hr_dat,
+            thicknesses=self.cfg.get("thicknesses"),
+            disorder_strengths=self.cfg.get("disorder_strengths"),
+            n_ensemble=self.cfg.get("n_ensemble", 50),
+            energy=self.cfg.get("fermi_shift_eV", 0.0),
+            n_jobs=self.cfg.get("n_jobs", 4),
+            mfp_n_layers_z=self.cfg.get("mfp_n_layers_z", 10),
+            mfp_lengths=self.cfg.get("mfp_lengths"),
+            lead_onsite_eV=self.cfg.get("lead_onsite_eV", 0.0),
+            base_seed=self.cfg.get("base_seed", 0),
+            lead_axis=self.cfg.get("transport_axis", "x"),
+            thickness_axis=self.cfg.get("thickness_axis", "z"),
+            n_layers_x=self.cfg.get("transport_n_layers_x", 4),
+            n_layers_y=self.cfg.get("transport_n_layers_y", 4),
+            carrier_density_m3=self.cfg.get("carrier_density_m3"),
+            fermi_velocity_m_per_s=self.cfg.get("fermi_velocity_m_per_s"),
+        )
+        results = tp.run_full()
+        run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
+        out_dir = run_dir / "transport" / str(label)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / "transport_result.json"
+        out_path.write_text(json.dumps({"transport_results": results}, indent=2))
+        return results
+
+    def _stage_transport_qsub(self, hr_dat: Path, *, label: str = "primary") -> tuple[dict, dict]:
+        from wtec.cluster.mpi import MPIConfig, build_command
+        from wtec.cluster.pbs import PBSJobConfig, generate_script
+        from wtec.cluster.ssh import open_ssh
+        from wtec.cluster.submit import JobManager
+        from wtec.config.cluster import ClusterConfig
+
+        cfg = ClusterConfig.from_env()
+        run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
+        transport_dir = run_dir / "transport" / str(label)
+        transport_dir.mkdir(parents=True, exist_ok=True)
+
+        payload_name = "transport_payload.json"
+        result_name = "transport_result.json"
+        payload_path = transport_dir / payload_name
+        win_path = hr_dat.with_name(f"{self.cfg.get('material', 'material')}.win")
+        payload = {
+            "hr_dat_path": hr_dat.name,
+            "win_path": win_path.name if win_path.exists() else None,
+            "thicknesses": self.cfg.get("thicknesses"),
+            "disorder_strengths": self.cfg.get("disorder_strengths"),
+            "n_ensemble": int(self.cfg.get("n_ensemble", 50)),
+            "energy": float(self.cfg.get("fermi_shift_eV", 0.0)),
+            "n_jobs": int(self.cfg.get("n_jobs", 1)),
+            "mfp_n_layers_z": int(self.cfg.get("mfp_n_layers_z", 10)),
+            "mfp_lengths": self.cfg.get("mfp_lengths"),
+            "lead_onsite_eV": float(self.cfg.get("lead_onsite_eV", 0.0)),
+            "base_seed": int(self.cfg.get("base_seed", 0)),
+            "lead_axis": str(self.cfg.get("transport_axis", "x")),
+            "thickness_axis": str(self.cfg.get("thickness_axis", "z")),
+            "n_layers_x": int(self.cfg.get("transport_n_layers_x", 4)),
+            "n_layers_y": int(self.cfg.get("transport_n_layers_y", 4)),
+            "carrier_density_m3": self.cfg.get("carrier_density_m3"),
+            "fermi_velocity_m_per_s": self.cfg.get("fermi_velocity_m_per_s"),
+        }
+        payload_path.write_text(json.dumps(payload, indent=2))
+
+        worker_zip = self._worker_source_zip(transport_dir)
+        stage_files: list[Path] = [payload_path, worker_zip, hr_dat]
+        if win_path.exists():
+            stage_files.append(win_path)
+
+        run_name = str(self.cfg.get("name", "run")).strip() or "run"
+        remote_dir = f"{self._remote_run_base(cfg)}/transport/{str(label)}"
+        walltime = str(self.cfg.get("transport_walltime", "01:00:00"))
+        python_exe = str(
+            self.cfg.get(
+                "transport_cluster_python_exe",
+                self.cfg.get("topology", {}).get("cluster_python_exe", "python3"),
+            )
+        ).strip() or "python3"
+
+        with open_ssh(cfg) as ssh:
+            jm = JobManager(ssh)
+            queue_used = jm.resolve_queue(
+                cfg.pbs_queue,
+                fallback_order=cfg.pbs_queue_priority,
+            )
+            cores_per_node = cfg.cores_for_queue(queue_used)
+            n_nodes = int(self.cfg.get("n_nodes", 1))
+            total_cores = max(1, n_nodes * cores_per_node)
+            raw_mpi_np = int(self.cfg.get("transport_mpi_np", 0))
+            raw_threads = int(self.cfg.get("transport_threads", 0))
+            autotune_meta: dict[str, Any] | None = None
+
+            autotune_cfg = self.cfg.get("transport_autotune", {})
+            if not isinstance(autotune_cfg, dict):
+                autotune_cfg = {}
+
+            def _resolve_profile(profile: dict[str, Any], *, total: int) -> tuple[int, int] | None:
+                try:
+                    mpi = max(1, int(profile.get("mpi_np", 1)))
+                except Exception:
+                    return None
+                raw_thr = profile.get("threads", "all")
+                if isinstance(raw_thr, str):
+                    s = raw_thr.strip().lower()
+                    if s in {"all", "max"}:
+                        thr = max(1, total // mpi)
+                    elif s in {"half", "1/2"}:
+                        thr = max(1, total // (2 * mpi))
+                    elif s in {"quarter", "1/4"}:
+                        thr = max(1, total // (4 * mpi))
+                    else:
+                        try:
+                            thr = int(s)
+                        except Exception:
+                            return None
+                else:
+                    try:
+                        thr = int(raw_thr)
+                    except Exception:
+                        return None
+                mpi = max(1, min(mpi, total))
+                thr = max(1, min(thr, total))
+                if mpi * thr > total:
+                    thr = max(1, total // mpi)
+                return mpi, thr
+
+            def _autotune_cache_path() -> Path:
+                raw = str(autotune_cfg.get("cache_file", "~/.wtec/transport_autotune.json")).strip()
+                return Path(raw).expanduser().resolve()
+
+            def _load_autotune_cache(path: Path) -> dict[str, Any]:
+                if not path.exists() or path.stat().st_size == 0:
+                    return {"entries": {}}
+                try:
+                    payload = json.loads(path.read_text())
+                except Exception:
+                    return {"entries": {}}
+                if not isinstance(payload, dict):
+                    return {"entries": {}}
+                entries = payload.get("entries")
+                if not isinstance(entries, dict):
+                    payload["entries"] = {}
+                return payload
+
+            def _save_autotune_cache(path: Path, payload: dict[str, Any]) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(payload, indent=2))
+
+            def _probe_walltime() -> str:
+                return str(autotune_cfg.get("benchmark_walltime", "00:08:00"))
+
+            autotune_enabled = bool(autotune_cfg.get("enabled", True))
+            autotune_scope = str(autotune_cfg.get("scope", "per_queue")).strip().lower() or "per_queue"
+            if autotune_scope != "per_queue":
+                autotune_scope = "per_queue"
+
+            # Avoid CPU oversubscription by default.
+            # Auto mode (0/0) favors thread-only parallelism for Kwant workloads.
+            if raw_mpi_np <= 0 and raw_threads <= 0:
+                mpi_np = 1
+                threads = total_cores
+                if autotune_enabled:
+                    cache_path = _autotune_cache_path()
+                    cache_payload = _load_autotune_cache(cache_path)
+                    key = (
+                        f"{cfg.host}|{queue_used}|{self.cfg.get('material', '')}|"
+                        f"{self.cfg.get('transport_axis', 'x')}|{self.cfg.get('thickness_axis', 'z')}|"
+                        f"{int(self.cfg.get('transport_n_layers_y', 4))}|{total_cores}"
+                    )
+                    cached_entry = (
+                        cache_payload.get("entries", {}).get(key)
+                        if isinstance(cache_payload.get("entries"), dict)
+                        else None
+                    )
+                    if isinstance(cached_entry, dict):
+                        try:
+                            c_np = int(cached_entry.get("mpi_np", 1))
+                            c_th = int(cached_entry.get("threads", total_cores))
+                            if c_np > 0 and c_th > 0 and c_np * c_th <= total_cores:
+                                mpi_np, threads = c_np, c_th
+                                autotune_meta = {
+                                    "status": "cache_hit",
+                                    "scope": "per_queue",
+                                    "cache_key": key,
+                                    "mpi_np": mpi_np,
+                                    "threads": threads,
+                                    "cache_file": str(cache_path),
+                                }
+                        except Exception:
+                            pass
+
+                    if autotune_meta is None:
+                        raw_profiles = autotune_cfg.get("profiles")
+                        if not isinstance(raw_profiles, list) or not raw_profiles:
+                            raw_profiles = [
+                                {"mpi_np": 1, "threads": "all"},
+                                {"mpi_np": 2, "threads": "half"},
+                                {"mpi_np": 4, "threads": "quarter"},
+                            ]
+                        candidates: list[tuple[int, int]] = []
+                        for profile in raw_profiles:
+                            if not isinstance(profile, dict):
+                                continue
+                            resolved = _resolve_profile(profile, total=total_cores)
+                            if resolved is None:
+                                continue
+                            if resolved not in candidates:
+                                candidates.append(resolved)
+                        if not candidates:
+                            candidates = [(1, total_cores)]
+
+                        best_elapsed = None
+                        best_pair = None
+                        for p_np, p_th in candidates:
+                            probe_name = f"probe_np{p_np}_th{p_th}"
+                            probe_dir_local = transport_dir / "_autotune_probe" / probe_name
+                            probe_dir_local.mkdir(parents=True, exist_ok=True)
+                            probe_payload_name = "probe_payload.json"
+                            probe_result_name = "probe_result.json"
+                            thicknesses_cfg = self.cfg.get("thicknesses")
+                            if not isinstance(thicknesses_cfg, list) or not thicknesses_cfg:
+                                thicknesses_cfg = [3]
+                            mfp_lengths_cfg = self.cfg.get("mfp_lengths")
+                            if not isinstance(mfp_lengths_cfg, list) or not mfp_lengths_cfg:
+                                mfp_lengths_cfg = [3]
+                            probe_payload = {
+                                "hr_dat_path": hr_dat.name,
+                                "win_path": win_path.name if win_path.exists() else None,
+                                "thicknesses": [min(int(x) for x in thicknesses_cfg)],
+                                "disorder_strengths": [0.0],
+                                "n_ensemble": int(autotune_cfg.get("benchmark_n_ensemble", 1)),
+                                "energy": float(self.cfg.get("fermi_shift_eV", 0.0)),
+                                "n_jobs": 1,
+                                "mfp_n_layers_z": int(self.cfg.get("mfp_n_layers_z", 10)),
+                                "mfp_lengths": [min(int(x) for x in mfp_lengths_cfg)],
+                                "lead_onsite_eV": float(self.cfg.get("lead_onsite_eV", 0.0)),
+                                "base_seed": int(self.cfg.get("base_seed", 0)),
+                                "lead_axis": str(self.cfg.get("transport_axis", "x")),
+                                "thickness_axis": str(self.cfg.get("thickness_axis", "z")),
+                                "n_layers_x": int(self.cfg.get("transport_n_layers_x", 4)),
+                                "n_layers_y": int(self.cfg.get("transport_n_layers_y", 4)),
+                                "carrier_density_m3": self.cfg.get("carrier_density_m3"),
+                                "fermi_velocity_m_per_s": self.cfg.get("fermi_velocity_m_per_s"),
+                            }
+                            probe_payload_path = probe_dir_local / probe_payload_name
+                            probe_payload_path.write_text(json.dumps(probe_payload, indent=2))
+                            probe_stage_files: list[Path] = [probe_payload_path, worker_zip, hr_dat]
+                            if win_path.exists():
+                                probe_stage_files.append(win_path)
+                            probe_remote_dir = (
+                                f"{self._remote_run_base(cfg)}/transport/_autotune/"
+                                f"{str(label)}_{probe_name}"
+                            )
+                            probe_job_name = f"ta_{p_np}_{p_th}"[:15]
+                            probe_worker_python = (
+                                f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}"
+                            )
+                            probe_cmd = build_command(
+                                probe_worker_python,
+                                mpi=MPIConfig(n_cores=p_np, n_pool=1),
+                                extra_args=f"-m wtec.workflow.transport_worker {probe_payload_name} {probe_result_name}",
+                            )
+                            probe_cmd = self._thread_exports(probe_cmd, threads=p_th)
+                            probe_script = generate_script(
+                                PBSJobConfig(
+                                    job_name=probe_job_name,
+                                    n_nodes=n_nodes,
+                                    n_cores_per_node=cores_per_node,
+                                    walltime=_probe_walltime(),
+                                    queue=queue_used,
+                                    work_dir=probe_remote_dir,
+                                    modules=cfg.modules,
+                                    env_vars={},
+                                ),
+                                [probe_cmd],
+                            )
+                            t0 = time.time()
+                            try:
+                                jm.submit_and_wait(
+                                    probe_script,
+                                    remote_dir=probe_remote_dir,
+                                    local_dir=probe_dir_local,
+                                    retrieve_patterns=[probe_result_name, "*.log", "*.out"],
+                                    script_name=f"transport_autotune_{probe_name}.pbs",
+                                    stage_files=probe_stage_files,
+                                    expected_local_outputs=[probe_result_name],
+                                    queue_used=queue_used,
+                                    poll_interval=int(self.cfg.get("_runtime_log_poll_interval", 5)),
+                                    live_log=False,
+                                    stale_log_seconds=int(self.cfg.get("_runtime_stale_log_seconds", 300)),
+                                )
+                            except Exception:
+                                continue
+                            elapsed = float(time.time() - t0)
+                            if best_elapsed is None or elapsed < best_elapsed:
+                                best_elapsed = elapsed
+                                best_pair = (p_np, p_th)
+
+                        if best_pair is not None:
+                            mpi_np, threads = best_pair
+                            entries = cache_payload.get("entries")
+                            if not isinstance(entries, dict):
+                                entries = {}
+                                cache_payload["entries"] = entries
+                            entries[key] = {
+                                "mpi_np": mpi_np,
+                                "threads": threads,
+                                "queue": queue_used,
+                                "total_cores": total_cores,
+                                "updated_at": int(time.time()),
+                                "best_elapsed_sec": best_elapsed,
+                            }
+                            _save_autotune_cache(cache_path, cache_payload)
+                            autotune_meta = {
+                                "status": "benchmarked",
+                                "scope": "per_queue",
+                                "cache_key": key,
+                                "cache_file": str(cache_path),
+                                "mpi_np": mpi_np,
+                                "threads": threads,
+                                "best_elapsed_sec": best_elapsed,
+                            }
+                        else:
+                            autotune_meta = {
+                                "status": "fallback_no_successful_probe",
+                                "scope": "per_queue",
+                                "mpi_np": mpi_np,
+                                "threads": threads,
+                            }
+            elif raw_mpi_np <= 0:
+                threads = max(1, min(raw_threads, total_cores))
+                mpi_np = max(1, total_cores // threads)
+            elif raw_threads <= 0:
+                mpi_np = max(1, min(raw_mpi_np, total_cores))
+                threads = max(1, total_cores // mpi_np)
+            else:
+                mpi_np = max(1, min(raw_mpi_np, total_cores))
+                threads = max(1, min(raw_threads, total_cores))
+
+            if mpi_np * threads > total_cores:
+                threads = max(1, total_cores // mpi_np)
+
+            print(
+                "[Orchestrator] Transport qsub resources: "
+                f"queue={queue_used}, nodes={n_nodes}, ppn={cores_per_node}, "
+                f"np={mpi_np}, threads={threads}"
+            )
+
+            worker_python = (
+                f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}"
+            )
+            cmd = build_command(
+                worker_python,
+                mpi=MPIConfig(n_cores=mpi_np, n_pool=1),
+                extra_args=f"-m wtec.workflow.transport_worker {payload_name} {result_name}",
+            )
+            cmd = self._thread_exports(cmd, threads=threads)
+            job_name = f"tr_{str(label)[:5]}_{run_name}"[:15]
+            script = generate_script(
+                PBSJobConfig(
+                    job_name=job_name,
+                    n_nodes=n_nodes,
+                    n_cores_per_node=cores_per_node,
+                    walltime=walltime,
+                    queue=queue_used,
+                    work_dir=remote_dir,
+                    modules=cfg.modules,
+                    env_vars={},
+                ),
+                [cmd],
+            )
+
+            meta = jm.submit_and_wait(
+                script,
+                remote_dir=remote_dir,
+                local_dir=transport_dir,
+                retrieve_patterns=[result_name, f"{job_name}.log", "*.out"],
+                    script_name=f"transport_worker_{str(label)}.pbs",
+                stage_files=stage_files,
+                expected_local_outputs=[result_name],
+                queue_used=queue_used,
+                poll_interval=int(self.cfg.get("_runtime_log_poll_interval", 5)),
+                live_log=bool(self.cfg.get("_runtime_live_log", True)),
+                live_files=[f"{job_name}.log", result_name],
+                stale_log_seconds=int(self.cfg.get("_runtime_stale_log_seconds", 300)),
+            )
+            if autotune_meta is not None:
+                meta["autotune"] = autotune_meta
+
+        out_payload = json.loads((transport_dir / result_name).read_text())
+        results = out_payload.get("transport_results", {})
+        if not isinstance(results, dict):
+            raise RuntimeError("Invalid transport worker result payload.")
+        return self._normalize_transport_results(results), meta
+
+    @staticmethod
+    def _thread_exports(command: str, *, threads: int) -> str:
+        t = max(1, int(threads))
+        exports = (
+            f"export OMP_NUM_THREADS={t}; "
+            f"export MKL_NUM_THREADS={t}; "
+            f"export OPENBLAS_NUM_THREADS={t}; "
+            f"export NUMEXPR_NUM_THREADS={t}; "
+        )
+        return exports + command
+
+    @staticmethod
+    def _normalize_transport_results(results: dict) -> dict:
+        out = dict(results)
+        scan = out.get("thickness_scan")
+        if isinstance(scan, dict):
+            fixed = {}
+            for k, v in scan.items():
+                key = k
+                try:
+                    key = float(k)
+                except Exception:
+                    pass
+                fixed[key] = v
+            out["thickness_scan"] = fixed
+        return out
+
+    @staticmethod
+    def _worker_source_zip(out_dir: Path) -> Path:
+        bundle = out_dir / "wtec_src.zip"
+        pkg_dir = Path(__file__).resolve().parents[1]  # .../wtec/wtec
+        with zipfile.ZipFile(bundle, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in pkg_dir.rglob("*.py"):
+                rel = p.relative_to(pkg_dir)
+                zf.write(p, arcname=str(Path("wtec") / rel))
+        return bundle
+
+    def _remote_run_base(self, cluster_cfg) -> str:
+        cfg_remote = str(self.cfg.get("remote_workdir", "")).strip()
+        if cfg_remote:
+            return cfg_remote.rstrip("/")
+        run_name = str(self.cfg.get("name", "run")).strip() or "run"
+        return f"{cluster_cfg.remote_workdir.rstrip('/')}/{run_name}"
+
+    def _transport_result_file(self) -> Path:
+        run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
+        primary = run_dir / "transport" / "primary" / "transport_result.json"
+        legacy = run_dir / "transport" / "transport_result.json"
+        if primary.exists():
+            return primary
+        return legacy
+
+    def _load_cached_transport_results(self) -> dict | None:
+        run_profile = str(self.cfg.get("run_profile", "strict")).strip().lower() or "strict"
+        default_reuse = run_profile == "smoke"
+        if not bool(self.cfg.get("reuse_transport_results", default_reuse)):
+            return None
+        p = self._transport_result_file()
+        if not p.exists() or p.stat().st_size == 0:
+            return None
+        try:
+            payload = json.loads(p.read_text())
+            res = payload.get("transport_results", {})
+            if not isinstance(res, dict):
+                return None
+            return self._normalize_transport_results(res)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _extract_zero_disorder_curve(transport_results: dict) -> tuple[list[int], list[float]] | None:
+        scan = transport_results.get("thickness_scan")
+        if not isinstance(scan, dict) or not scan:
+            return None
+        key = None
+        for k in scan.keys():
+            try:
+                if abs(float(k)) < 1e-12:
+                    key = k
+                    break
+            except Exception:
+                continue
+        if key is None:
+            key = sorted(scan.keys(), key=lambda x: float(x))[0]
+        payload = scan.get(key, {})
+        if not isinstance(payload, dict):
+            return None
+        t = payload.get("thickness_uc")
+        rho = payload.get("rho_mean")
+        if t is None or rho is None:
+            return None
+        try:
+            t_vals = [int(v) for v in t]
+            rho_vals = [float(v) for v in rho]
+        except Exception:
+            return None
+        if len(t_vals) != len(rho_vals) or not t_vals:
+            return None
+        return t_vals, rho_vals
+
+    @classmethod
+    def _transport_compare_summary(cls, qe_track: dict, si_track: dict) -> dict[str, Any]:
+        import numpy as np
+
+        q = cls._extract_zero_disorder_curve(qe_track)
+        s = cls._extract_zero_disorder_curve(si_track)
+        if q is None or s is None:
+            return {
+                "status": "failed",
+                "reason": "missing_zero_disorder_curve",
+            }
+
+        tq, rq = q
+        ts, rs = s
+        map_q = {int(t): float(r) for t, r in zip(tq, rq)}
+        map_s = {int(t): float(r) for t, r in zip(ts, rs)}
+        common = sorted(set(map_q).intersection(map_s))
+        if len(common) < 2:
+            return {
+                "status": "failed",
+                "reason": "insufficient_common_thickness_points",
+                "common_thicknesses": common,
+            }
+
+        q_arr = np.array([map_q[t] for t in common], dtype=float)
+        s_arr = np.array([map_s[t] for t in common], dtype=float)
+        eps = 1e-30
+        qn = q_arr / max(float(np.nanmean(np.abs(q_arr))), eps)
+        sn = s_arr / max(float(np.nanmean(np.abs(s_arr))), eps)
+        corr = float(np.corrcoef(qn, sn)[0, 1]) if len(common) >= 2 else float("nan")
+
+        tq_min = int(common[int(np.argmin(q_arr))])
+        ts_min = int(common[int(np.argmin(s_arr))])
+        rq_min = float(np.min(q_arr))
+        rs_min = float(np.min(s_arr))
+        min_delta_frac = float(abs(rs_min - rq_min) / max(abs(rq_min), eps))
+
+        return {
+            "status": "ok",
+            "common_thicknesses_uc": common,
+            "pearson_corr_normalized_rho": corr,
+            "qe_minimum": {"thickness_uc": tq_min, "rho": rq_min},
+            "siesta_minimum": {"thickness_uc": ts_min, "rho": rs_min},
+            "minimum_relative_deviation": min_delta_frac,
+        }
+
+    def _find_pristine_variant_hr_from_manifest(self, run_dir: Path) -> Path | None:
+        manifest = run_dir / "topology" / "topology_point_manifest.json"
+        if not manifest.exists() or manifest.stat().st_size == 0:
+            return None
+        try:
+            payload = json.loads(manifest.read_text())
+        except Exception:
+            return None
+        rows = payload.get("points", [])
+        if not isinstance(rows, list):
+            return None
+        candidates: list[tuple[int, Path]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not bool(row.get("is_pristine", False)):
+                continue
+            if str(row.get("status", "")).lower() != "ok":
+                continue
+            hr_raw = row.get("hr_dat_path")
+            if not hr_raw:
+                continue
+            p = Path(str(hr_raw)).expanduser().resolve()
+            if not p.exists():
+                continue
+            try:
+                th = int(row.get("thickness_uc", 10**9))
+            except Exception:
+                th = 10**9
+            candidates.append((th, p))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    def _run_transport_track(self, hr_dat: Path, *, label: str) -> tuple[dict, dict]:
+        backend = str(self.cfg.get("transport_backend", "qsub")).strip().lower()
+        strict_qsub = bool(self.cfg.get("transport_strict_qsub", True))
+        if backend == "qsub":
+            try:
+                return self._stage_transport_qsub(hr_dat, label=label)
+            except Exception as exc:
+                if strict_qsub:
+                    raise
+                res = self._stage_transport_local(hr_dat, label=label)
+                return res, {
+                    "status": "LOCAL_FALLBACK",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                    "backend": "local",
+                }
+        if backend == "local":
+            return self._stage_transport_local(hr_dat, label=label), {"status": "LOCAL", "backend": "local"}
+        raise ValueError(f"Unknown transport_backend={backend!r}. Use 'qsub' or 'local'.")
+
+    def _anchor_transfer_cfg(self) -> dict[str, Any]:
+        dft_tbl = self.cfg.get("dft", {}) if isinstance(self.cfg.get("dft"), dict) else {}
+        nested = dft_tbl.get("anchor_transfer", {}) if isinstance(dft_tbl.get("anchor_transfer"), dict) else {}
+        flat = self.cfg.get("dft_anchor_transfer", {}) if isinstance(self.cfg.get("dft_anchor_transfer"), dict) else {}
+
+        out: dict[str, Any] = {
+            "enabled": self._dft_mode() == "dual_family",
+            "mode": "delta_h",
+            "basis_policy": "strict_same_basis",
+            "scope": "onsite_plus_first_shell",
+            "fit_window_ev": 1.5,
+            "fit_kmesh": [8, 8, 8],
+            "alpha_grid_min": -0.5,
+            "alpha_grid_max": 1.5,
+            "alpha_grid_points": 81,
+            "max_retries": 5,
+            "retry_kmesh_step": 2,
+            "retry_window_step_ev": 0.5,
+            "reuse_existing": True,
+        }
+        out.update(nested)
+        out.update(flat)
+        out["enabled"] = bool(out.get("enabled", True))
+        out["mode"] = str(out.get("mode", "delta_h")).strip().lower() or "delta_h"
+        out["basis_policy"] = str(out.get("basis_policy", "strict_same_basis")).strip() or "strict_same_basis"
+        out["scope"] = str(out.get("scope", "onsite_plus_first_shell")).strip() or "onsite_plus_first_shell"
+        out["fit_window_ev"] = float(out.get("fit_window_ev", 1.5))
+        out["fit_kmesh"] = [int(v) for v in out.get("fit_kmesh", [8, 8, 8])]
+        out["alpha_grid_min"] = float(out.get("alpha_grid_min", -0.5))
+        out["alpha_grid_max"] = float(out.get("alpha_grid_max", 1.5))
+        out["alpha_grid_points"] = int(out.get("alpha_grid_points", 81))
+        out["max_retries"] = max(1, int(out.get("max_retries", 5)))
+        out["retry_kmesh_step"] = max(0, int(out.get("retry_kmesh_step", 2)))
+        out["retry_window_step_ev"] = max(0.0, float(out.get("retry_window_step_ev", 0.5)))
+        out["reuse_existing"] = bool(out.get("reuse_existing", True))
+        return out
+
+    def _prepare_delta_h_artifact(self, pes_hr_path: Path) -> Path | None:
+        cfg_anchor = self._anchor_transfer_cfg()
+        if not bool(cfg_anchor.get("enabled", False)):
+            return None
+        if self._dft_mode() != "dual_family":
+            return None
+        if str(cfg_anchor.get("mode", "delta_h")).strip().lower() != "delta_h":
+            raise ValueError("Only dft.anchor_transfer.mode='delta_h' is currently supported.")
+
+        run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
+        artifact_path = run_dir / "topology" / "delta_h_artifact.json"
+        if (
+            bool(cfg_anchor.get("reuse_existing", True))
+            and artifact_path.exists()
+            and artifact_path.stat().st_size > 0
+        ):
+            self._state["outputs"]["delta_h_artifact"] = str(artifact_path.resolve())
+            self._state["outputs"]["dft_anchor_transfer"] = {
+                "status": "reused",
+                "artifact_path": str(artifact_path.resolve()),
+            }
+            self._save_checkpoint()
+            return artifact_path
+
+        from wtec.cluster.ssh import open_ssh
+        from wtec.cluster.submit import JobManager
+        from wtec.config.cluster import ClusterConfig
+        from wtec.config.materials import get_material
+        from wtec.wannier.delta_h import build_delta_h_artifact, write_delta_h_artifact
+
+        material = str(self.cfg.get("material", "")).strip()
+        if not material:
+            raise ValueError("material is required for dft.anchor_transfer")
+        preset = get_material(material)
+        lcao_engine = self._variant_dft_engine()
+        cluster_cfg = ClusterConfig.from_env()
+
+        anchor_dir = run_dir / "dft_anchor_lcao"
+        anchor_dir.mkdir(parents=True, exist_ok=True)
+        atoms_ref = self._reference_atoms(self._build_atoms_from_config())
+
+        k_scf_base = tuple(int(v) for v in self.cfg.get("kpoints_scf", (8, 8, 8)))
+        k_nscf_base = tuple(int(v) for v in self.cfg.get("kpoints_nscf", (12, 12, 12)))
+        dis_win_base = tuple(float(v) for v in getattr(preset, "dis_win", (-4.0, 16.0)))
+        dis_froz_base = tuple(float(v) for v in getattr(preset, "dis_froz_win", (-1.0, 1.0)))
+        k_step = int(cfg_anchor.get("retry_kmesh_step", 2))
+        w_step = float(cfg_anchor.get("retry_window_step_ev", 0.5))
+        max_retries = int(cfg_anchor.get("max_retries", 5))
+
+        success: dict[str, Any] | None = None
+        attempt_history: list[dict[str, Any]] = []
+        last_error: str | None = None
+
+        for attempt in range(max_retries):
+            k_scf = tuple(max(1, int(v) + (attempt * k_step)) for v in k_scf_base)
+            k_nscf = tuple(max(1, int(v) + (attempt * k_step)) for v in k_nscf_base)
+            dis_win = (
+                float(dis_win_base[0]) - (attempt * w_step),
+                float(dis_win_base[1]) + (attempt * w_step),
+            )
+            dis_froz = (
+                float(dis_froz_base[0]) - (attempt * 0.5 * w_step),
+                float(dis_froz_base[1]) + (attempt * 0.5 * w_step),
+            )
+            attempt_meta: dict[str, Any] = {
+                "attempt": attempt + 1,
+                "kpoints_scf": list(k_scf),
+                "kpoints_nscf": list(k_nscf),
+                "dis_win": [float(dis_win[0]), float(dis_win[1])],
+                "dis_froz_win": [float(dis_froz[0]), float(dis_froz[1])],
+                "engine": lcao_engine,
+            }
+            try:
+                with open_ssh(cluster_cfg) as ssh:
+                    jm = JobManager(ssh)
+                    common_kwargs = {
+                        "run_dir": anchor_dir,
+                        "remote_base": self.cfg.get("remote_workdir", cluster_cfg.remote_workdir),
+                        "n_nodes": self.cfg.get("n_nodes", 1),
+                        "n_cores_per_node": cluster_cfg.mpi_cores,
+                        "n_cores_by_queue": cluster_cfg.mpi_cores_by_queue,
+                        "queue": cluster_cfg.pbs_queue,
+                        "queue_priority": cluster_cfg.pbs_queue_priority,
+                        "kpoints_scf": k_scf,
+                        "kpoints_nscf": k_nscf,
+                        "omp_threads": cluster_cfg.omp_threads,
+                        "modules": cluster_cfg.modules,
+                        "bin_dirs": cluster_cfg.bin_dirs,
+                        "live_log": self.cfg.get("_runtime_live_log", True),
+                        "log_poll_interval": self.cfg.get("_runtime_log_poll_interval", 5),
+                        "stale_log_seconds": self.cfg.get("_runtime_stale_log_seconds", 300),
+                    }
+                    if lcao_engine == "siesta":
+                        from wtec.siesta.parser import parse_fermi_energy
+                        from wtec.siesta.runner import SiestaPipeline as PipelineClass
+
+                        siesta_cfg = self._dft_siesta_cfg()
+                        pipeline = PipelineClass(
+                            atoms_ref,
+                            material,
+                            jm,
+                            pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cluster_cfg.siesta_pseudo_dir),
+                            basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
+                            wannier_interface=str(
+                                siesta_cfg.get("wannier_interface", "sisl")
+                            ).strip().lower(),
+                            spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                            include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                            mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
+                            mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
+                            mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
+                            omp_threads_scf=int(siesta_cfg.get("omp_threads_scf", 0)),
+                            omp_threads_nscf=int(siesta_cfg.get("omp_threads_nscf", 0)),
+                            omp_threads_wannier=int(siesta_cfg.get("omp_threads_wannier", 0)),
+                            factorization_defaults=(
+                                siesta_cfg.get("factorization_defaults", {})
+                                if isinstance(siesta_cfg.get("factorization_defaults"), dict)
+                                else {}
+                            ),
+                            dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
+                            dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                            electronic_temperature_k=float(
+                                siesta_cfg.get("electronic_temperature_k", 300.0)
+                            ),
+                            max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                            dispersion_cfg=self._dft_dispersion_cfg(),
+                            **common_kwargs,
+                        )
+                    elif lcao_engine == "abacus":
+                        from wtec.abacus.parser import parse_fermi_energy
+                        from wtec.abacus.runner import AbacusPipeline as PipelineClass
+
+                        abacus_cfg = self._dft_abacus_cfg()
+                        pipeline = PipelineClass(
+                            atoms_ref,
+                            material,
+                            jm,
+                            pseudo_dir=str(abacus_cfg.get("pseudo_dir") or cluster_cfg.abacus_pseudo_dir),
+                            orbital_dir=str(
+                                abacus_cfg.get("orbital_dir") or cluster_cfg.abacus_orbital_dir
+                            ),
+                            basis_type=str(abacus_cfg.get("basis_type", "lcao")).strip().lower() or "lcao",
+                            ks_solver=str(abacus_cfg.get("ks_solver", "genelpa")).strip().lower() or "genelpa",
+                            executable=str(abacus_cfg.get("executable", "abacus")).strip() or "abacus",
+                            **common_kwargs,
+                        )
+                    else:
+                        raise ValueError(
+                            f"dft.anchor_transfer requires LCAO engine in ['siesta','abacus'], got {lcao_engine!r}."
+                        )
+
+                    scf_meta = pipeline.run_scf()
+                    scf_out = anchor_dir / f"{material}.scf.out"
+                    fermi_lcao = float(parse_fermi_energy(scf_out))
+                    nscf_meta = pipeline.run_nscf(fermi_lcao)
+                    wan_meta = pipeline.run_wannier(
+                        fermi_lcao,
+                        dis_win_override=dis_win,
+                        dis_froz_win_override=dis_froz,
+                    )
+
+                anchor_hr = anchor_dir / f"{material}_hr.dat"
+                anchor_win = anchor_dir / f"{material}.win"
+                if not anchor_hr.exists():
+                    raise FileNotFoundError(f"Anchor LCAO _hr.dat not found: {anchor_hr}")
+                if not anchor_win.exists():
+                    raise FileNotFoundError(f"Anchor LCAO .win not found: {anchor_win}")
+                attempt_meta["status"] = "ok"
+                attempt_meta["fermi_ev"] = float(fermi_lcao)
+                attempt_meta["jobs"] = {
+                    "scf": scf_meta.get("job_id"),
+                    "nscf": nscf_meta.get("job_id"),
+                    "wannier": wan_meta.get("job_id"),
+                }
+                success = {
+                    "hr_dat_path": str(anchor_hr.resolve()),
+                    "win_path": str(anchor_win.resolve()),
+                    "fermi_ev": float(fermi_lcao),
+                    "attempt": attempt + 1,
+                    "jobs": attempt_meta["jobs"],
+                }
+                attempt_history.append(attempt_meta)
+                break
+            except Exception as exc:
+                reason = f"{type(exc).__name__}: {exc}"
+                attempt_meta["status"] = "failed"
+                attempt_meta["reason"] = reason
+                attempt_history.append(attempt_meta)
+                last_error = reason
+
+        if success is None:
+            raise RuntimeError(
+                "dft.anchor_transfer failed after "
+                f"{max_retries} attempts. Last error: {last_error or 'unknown'}"
+            )
+
+        fermi_pes = self._state.get("outputs", {}).get("fermi_ev")
+        if fermi_pes is None:
+            fermi_pes = 0.0
+        try:
+            fermi_pes = float(fermi_pes)
+        except Exception:
+            fermi_pes = 0.0
+
+        alpha_points = max(2, int(cfg_anchor.get("alpha_grid_points", 81)))
+        alpha_grid = np.linspace(
+            float(cfg_anchor.get("alpha_grid_min", -0.5)),
+            float(cfg_anchor.get("alpha_grid_max", 1.5)),
+            alpha_points,
+        )
+        pes_win_path = pes_hr_path.with_name(f"{material}.win")
+        artifact = build_delta_h_artifact(
+            pes_hr_dat_path=pes_hr_path,
+            pes_win_path=pes_win_path if pes_win_path.exists() else None,
+            lcao_hr_dat_path=success["hr_dat_path"],
+            lcao_win_path=success["win_path"],
+            material=material,
+            fermi_pes_ev=float(fermi_pes),
+            fermi_lcao_ev=float(success["fermi_ev"]),
+            basis_policy=str(cfg_anchor.get("basis_policy", "strict_same_basis")),
+            scope=str(cfg_anchor.get("scope", "onsite_plus_first_shell")),
+            fit_window_ev=float(cfg_anchor.get("fit_window_ev", 1.5)),
+            fit_kmesh=tuple(int(v) for v in cfg_anchor.get("fit_kmesh", [8, 8, 8])),
+            alpha_grid=alpha_grid,
+        )
+        artifact["attempt_history"] = attempt_history
+        artifact["anchor"]["lcao_engine"] = lcao_engine
+        artifact["anchor"]["lcao_hr_attempt"] = int(success["attempt"])
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        write_delta_h_artifact(artifact_path, artifact)
+
+        self._state["outputs"]["delta_h_artifact"] = str(artifact_path.resolve())
+        self._state["outputs"]["dft_anchor_transfer"] = {
+            "status": "ok",
+            "mode": "delta_h",
+            "lcao_engine": lcao_engine,
+            "artifact_path": str(artifact_path.resolve()),
+            "attempts": attempt_history,
+        }
+        self._state["outputs"]["fermi_ev_lcao_anchor"] = float(success["fermi_ev"])
+        self._save_checkpoint()
+        return artifact_path
+
+    def _stage_analysis(self, transport_results: dict, *, hr_dat: Path | None = None) -> dict:
+        self._set_stage("ANALYSIS")
+        from wtec.analysis.thickness_scan import detect_rho_minimum, plot_rho_vs_thickness
+        from wtec.analysis.mfp_compare import summarize_mfp
+        from wtec.workflow.topology_pipeline import TopologyPipeline
+
+        run_dir = Path(self.cfg.get("run_dir", "."))
+        plot_rho_vs_thickness(
+            transport_results["thickness_scan"],
+            outfile=run_dir / "rho_vs_thickness.pdf",
+        )
+        mfp_summary = summarize_mfp(transport_results.get("mfp", {}))
+        rho_signature: dict[str, Any] = {
+            "has_curve": False,
+            "has_rho_minimum": False,
+            "reason": "missing_zero_disorder_curve",
+        }
+        curve = self._extract_zero_disorder_curve(transport_results)
+        if curve is not None:
+            t_uc, rho_vals = curve
+            scan = transport_results.get("thickness_scan", {})
+            zero_payload = None
+            if isinstance(scan, dict):
+                for k, v in scan.items():
+                    try:
+                        if abs(float(k)) < 1e-12 and isinstance(v, dict):
+                            zero_payload = v
+                            break
+                    except Exception:
+                        continue
+                if zero_payload is None and scan:
+                    try:
+                        first_key = sorted(scan.keys(), key=lambda x: float(x))[0]
+                    except Exception:
+                        first_key = list(scan.keys())[0]
+                    cand = scan.get(first_key)
+                    if isinstance(cand, dict):
+                        zero_payload = cand
+            thickness_m = (
+                zero_payload.get("thickness_m")
+                if isinstance(zero_payload, dict)
+                else None
+            )
+            if isinstance(thickness_m, list) and len(thickness_m) == len(rho_vals):
+                import numpy as np
+
+                sig = detect_rho_minimum(
+                    np.asarray(thickness_m, dtype=float),
+                    np.asarray(rho_vals, dtype=float),
+                )
+            else:
+                idx_min = min(range(len(rho_vals)), key=lambda i: rho_vals[i])
+                sig = {
+                    "has_minimum": bool(0 < idx_min < (len(rho_vals) - 1)),
+                    "d_min_nm": None,
+                    "rho_min": float(rho_vals[idx_min]),
+                    "idx_min": int(idx_min),
+                }
+            rho_signature = {
+                "has_curve": True,
+                "thickness_uc": [int(v) for v in t_uc],
+                "rho": [float(v) for v in rho_vals],
+                "has_rho_minimum": bool(sig.get("has_minimum", False)),
+                "rho_minimum": sig,
+                "thinning_reduces_rho": bool(rho_vals[0] < rho_vals[-1]),
+            }
+        topo_summary: dict[str, Any] | None = None
+        transport_compare: dict[str, Any] | None = None
+        topology_cfg = self.cfg.get("topology", {})
+        if not isinstance(topology_cfg, dict):
+            topology_cfg = {}
+        if self._dft_mode() in {"hybrid_qe_ref_siesta_variants", "dual_family"}:
+            topology_cfg = dict(topology_cfg)
+            topology_cfg.setdefault("variant_dft_engine", self._variant_dft_engine())
+
+        hr_path = hr_dat or self._resolve_hr_dat_from_cfg_or_state()
+        delta_h_artifact_path: Path | None = None
+        if hr_path is not None and Path(hr_path).exists():
+            try:
+                delta_h_artifact_path = self._prepare_delta_h_artifact(Path(hr_path))
+            except Exception as exc:
+                topo_summary = {"status": "failed", "reason": f"anchor_transfer_failed:{type(exc).__name__}: {exc}"}
+                self._state["outputs"]["topology_results"] = "failed"
+                self._state["outputs"]["topology_summary"] = topo_summary
+                self._save_checkpoint()
+                return {
+                    "mfp_summary": mfp_summary,
+                    "rho_signature": rho_signature,
+                    "topology": topo_summary,
+                    "transport_compare": transport_compare,
+                }
+        if delta_h_artifact_path is not None:
+            topology_cfg = dict(topology_cfg)
+            topology_cfg["delta_h_artifact_path"] = str(delta_h_artifact_path.resolve())
+
+        cfg_for_topology = dict(self.cfg)
+        cfg_for_topology["topology"] = topology_cfg
+
+        if hr_path is not None and Path(hr_path).exists():
+            try:
+                topo = TopologyPipeline(
+                    hr_path,
+                    run_dir=run_dir,
+                    cfg=cfg_for_topology,
+                    transport_results=transport_results,
+                    fermi_ev_checkpoint=self._state.get("outputs", {}).get("fermi_ev"),
+                )
+                topo_result = topo.run()
+                topo_summary = topo_result.get("summary", topo_result)
+                self._state["outputs"]["topology_results"] = "computed"
+                self._state["outputs"]["topology_summary"] = topo_summary
+                if isinstance(topo_summary, dict):
+                    if isinstance(topo_summary.get("variant_hr_map"), dict):
+                        self._state["outputs"]["variant_hr_map"] = topo_summary.get("variant_hr_map")
+                    if isinstance(topo_summary.get("variant_fermi_ev_map"), dict):
+                        self._state["outputs"]["variant_fermi_ev_map"] = topo_summary.get(
+                            "variant_fermi_ev_map"
+                        )
+            except Exception as exc:
+                topo_summary = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+                self._state["outputs"]["topology_results"] = "failed"
+                self._state["outputs"]["topology_summary"] = topo_summary
+        else:
+            topo_summary = {"status": "skipped", "reason": "missing_hr_dat"}
+            self._state["outputs"]["topology_results"] = "skipped"
+            self._state["outputs"]["topology_summary"] = topo_summary
+
+        transport_policy = str(self.cfg.get("transport_policy", "")).strip().lower()
+        if transport_policy == "dual_track_compare" and self._dft_mode() == "hybrid_qe_ref_siesta_variants":
+            try:
+                qe_hr = hr_path if hr_path is not None else self._resolve_hr_dat_from_cfg_or_state()
+                si_hr = self._find_pristine_variant_hr_from_manifest(run_dir)
+                if qe_hr is None or not Path(qe_hr).exists():
+                    raise FileNotFoundError("missing_qe_reference_hr")
+                if si_hr is None or not si_hr.exists():
+                    raise FileNotFoundError("missing_siesta_pristine_variant_hr")
+                qe_track = self._normalize_transport_results(transport_results)
+                si_track, si_meta = self._run_transport_track(Path(si_hr), label="siesta_pristine")
+                transport_compare = self._transport_compare_summary(qe_track, si_track)
+                transport_compare["policy"] = "dual_track_compare"
+                transport_compare["tracks"] = {
+                    "qe_reference": {
+                        "hr_dat_path": str(Path(qe_hr).resolve()),
+                        "job": self._state.get("outputs", {}).get("transport_job"),
+                    },
+                    "siesta_pristine": {
+                        "hr_dat_path": str(Path(si_hr).resolve()),
+                        "job": si_meta,
+                    },
+                }
+                report_dir = run_dir / "report"
+                report_dir.mkdir(parents=True, exist_ok=True)
+                (report_dir / "transport_compare.json").write_text(
+                    json.dumps(transport_compare, indent=2)
+                )
+                self._state["outputs"]["transport_compare"] = "computed"
+            except Exception as exc:
+                transport_compare = {"status": "failed", "reason": f"{type(exc).__name__}: {exc}"}
+                self._state["outputs"]["transport_compare"] = "failed"
+
+        self._save_checkpoint()
+        return {
+            "mfp_summary": mfp_summary,
+            "rho_signature": rho_signature,
+            "topology": topo_summary,
+            "transport_compare": transport_compare,
+        }
+
+    # ── checkpoint helpers ────────────────────────────────────────────────────
+
+    def _set_stage(self, stage: str) -> None:
+        self._state["stage"] = stage
+        self._state["timestamp"] = time.time()
+        print(f"[Orchestrator] Stage: {stage}")
+
+    def _advance_to(self, stage: str) -> None:
+        self._set_stage(stage)
+        self._save_checkpoint()
+
+    def _save_checkpoint(self) -> None:
+        self._checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
+        self._checkpoint_file.write_text(json.dumps(self._state, indent=2))
+
+    def _load_checkpoint(self) -> None:
+        if self._checkpoint_file.exists():
+            self._state = json.loads(self._checkpoint_file.read_text())
+
+    def _resolve_hr_dat_from_cfg_or_state(self) -> Path | None:
+        """Resolve hr_dat from explicit config first, then checkpoint state."""
+        hr_cfg = self.cfg.get("hr_dat_path")
+        if hr_cfg:
+            if self._dft_reuse_mode() == "none":
+                raise ValueError(
+                    "Explicit hr_dat_path is not allowed when dft.reuse_mode='none'."
+                )
+            p = Path(hr_cfg)
+            if not p.exists():
+                raise FileNotFoundError(f"Configured hr_dat_path not found: {p}")
+            return p
+
+        hr_state = self._state.get("outputs", {}).get("hr_dat")
+        if not hr_state:
+            return None
+        p = Path(hr_state)
+        return p if p.exists() else None
+
+    def _build_atoms_from_config(self):
+        import ase.io
+        from wtec.structure.defect import DefectBuilder
+
+        struct_file = self.cfg["structure_file"]
+        atoms = ase.io.read(struct_file)
+
+        defect_cfg = self.cfg.get("defect")
+        if not defect_cfg:
+            return atoms
+
+        db = DefectBuilder(atoms)
+        dtype = defect_cfg["type"]
+        sc = tuple(defect_cfg.get("supercell", [2, 2, 2]))
+        if dtype == "vacancy":
+            return db.vacancy(defect_cfg["site"], supercell=sc)
+        if dtype == "substitution":
+            return db.substitute(defect_cfg["site"], defect_cfg["element"], supercell=sc)
+        if dtype == "antisite":
+            return db.antisite(defect_cfg["site"], defect_cfg["site_b"], supercell=sc)
+        raise ValueError(f"Unknown defect type: {dtype!r}")
