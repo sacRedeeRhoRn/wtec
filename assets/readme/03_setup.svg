@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" role="img" aria-label="wtec setup and configuration anatomy">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#08080f"/>
+      <stop offset="100%" stop-color="#0d0d1c"/>
+    </linearGradient>
+    <filter id="glow3">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="960" height="420" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="480" y="28" font-size="15" fill="#445566" font-family="monospace" text-anchor="middle" letter-spacing="2">SETUP  &amp;  CONFIGURATION</text>
+
+  <!-- ─────────────────────────────────────────────── -->
+  <!-- LEFT: project directory tree                   -->
+  <!-- ─────────────────────────────────────────────── -->
+
+  <text x="40" y="56" font-size="13" fill="#556677" font-family="monospace" letter-spacing="1">PROJECT  LAYOUT</text>
+
+  <!-- Directory tree lines -->
+  <g font-family="monospace" font-size="12.5">
+    <!-- root -->
+    <text x="40"  y="80"  fill="#7799bb">my_TaP_run/</text>
+    <!-- level 1 items -->
+    <text x="40"  y="100" fill="#445566">├──</text>
+    <text x="72"  y="100" fill="#ee9955">wtec_project.toml</text>
+    <text x="280" y="100" fill="#334455">   ← main config</text>
+
+    <text x="40"  y="120" fill="#445566">├──</text>
+    <text x="72"  y="120" fill="#88cc88">slab.vasp</text>
+    <text x="280" y="120" fill="#334455">        ← input geometry</text>
+
+    <text x="40"  y="140" fill="#445566">├──</text>
+    <text x="72"  y="140" fill="#aaaacc">variants/</text>
+    <text x="40"  y="160" fill="#445566">│   ├──</text>
+    <text x="88"  y="160" fill="#9988cc">pristine/</text>
+    <text x="40"  y="180" fill="#445566">│   └──</text>
+    <text x="88"  y="180" fill="#cc8899">defect_O_vac/</text>
+
+    <text x="40"  y="200" fill="#445566">├──</text>
+    <text x="72"  y="200" fill="#aaaacc">dft_runs/</text>
+    <text x="40"  y="220" fill="#445566">│   └──</text>
+    <text x="88"  y="220" fill="#778899">siesta_TaP.fdf</text>
+
+    <text x="40"  y="240" fill="#445566">├──</text>
+    <text x="72"  y="240" fill="#aaaacc">wannier/</text>
+    <text x="40"  y="260" fill="#445566">│   ├──</text>
+    <text x="88"  y="260" fill="#778899">TaP.win</text>
+    <text x="40"  y="280" fill="#445566">│   └──</text>
+    <text x="88"  y="280" fill="#778899">TaP_hr.dat</text>
+
+    <text x="40"  y="300" fill="#445566">└──</text>
+    <text x="72"  y="300" fill="#aaaacc">results/</text>
+    <text x="40"  y="320" fill="#445566">    ├──</text>
+    <text x="88"  y="320" fill="#cc8855">transport_result.json</text>
+    <text x="40"  y="340" fill="#445566">    ├──</text>
+    <text x="88"  y="340" fill="#cc8855">topology_deviation.csv</text>
+    <text x="40"  y="360" fill="#445566">    └──</text>
+    <text x="88"  y="360" fill="#88cc88">wtec_report.md</text>
+  </g>
+
+  <!-- Divider -->
+  <line x1="420" y1="44" x2="420" y2="400" stroke="#1a1a2a" stroke-width="1"/>
+
+  <!-- ─────────────────────────────────────────────── -->
+  <!-- RIGHT: config toml anatomy                     -->
+  <!-- ─────────────────────────────────────────────── -->
+
+  <text x="440" y="56" font-size="13" fill="#556677" font-family="monospace" letter-spacing="1">wtec_project.toml  (annotated)</text>
+
+  <!-- Config block: [material] -->
+  <rect x="440" y="65" width="500" height="56" rx="4" fill="#0c0c1a" stroke="#1e2a40" stroke-width="1"/>
+  <text x="452" y="82"  font-size="11.5" fill="#6688cc" font-family="monospace">[material]</text>
+  <text x="452" y="98"  font-size="11.5" fill="#778899" font-family="monospace">formula  =  "TaP"</text>
+  <text x="452" y="114" font-size="11.5" fill="#778899" font-family="monospace">class    =  "weyl"</text>
+  <text x="720" y="98"  font-size="10.5" fill="#334455" font-family="monospace">← triggers topology checks</text>
+
+  <!-- Config block: [dft] -->
+  <rect x="440" y="130" width="500" height="72" rx="4" fill="#0a120c" stroke="#1a3a22" stroke-width="1"/>
+  <text x="452" y="148" font-size="11.5" fill="#44bb88" font-family="monospace">[dft]</text>
+  <text x="452" y="164" font-size="11.5" fill="#778899" font-family="monospace">engine   =  "siesta"</text>
+  <text x="452" y="180" font-size="11.5" fill="#778899" font-family="monospace">kmesh_scf   =  [6, 6, 6]</text>
+  <text x="452" y="196" font-size="11.5" fill="#778899" font-family="monospace">kmesh_nscf  =  [8, 8, 8]</text>
+  <text x="720" y="164" font-size="10.5" fill="#334455" font-family="monospace">← default engine</text>
+  <text x="720" y="196" font-size="10.5" fill="#334455" font-family="monospace">← z≥6 required for Weyl</text>
+
+  <!-- Config block: [wannier] -->
+  <rect x="440" y="211" width="500" height="72" rx="4" fill="#100c18" stroke="#2a1a3a" stroke-width="1"/>
+  <text x="452" y="229" font-size="11.5" fill="#aa88ee" font-family="monospace">[wannier]</text>
+  <text x="452" y="245" font-size="11.5" fill="#778899" font-family="monospace">num_wann     =  28</text>
+  <text x="452" y="261" font-size="11.5" fill="#778899" font-family="monospace">dis_num_iter =  1000</text>
+  <text x="452" y="277" font-size="11.5" fill="#778899" font-family="monospace">dis_win_max  =  2.5</text>
+  <text x="720" y="261" font-size="10.5" fill="#334455" font-family="monospace">← convergence gate checks this</text>
+  <text x="720" y="277" font-size="10.5" fill="#334455" font-family="monospace">← eV above E_F</text>
+
+  <!-- Config block: [topology] -->
+  <rect x="440" y="292" width="500" height="72" rx="4" fill="#100a0c" stroke="#3a1a20" stroke-width="1"/>
+  <text x="452" y="310" font-size="11.5" fill="#ee6699" font-family="monospace">[topology]</text>
+  <text x="452" y="326" font-size="11.5" fill="#778899" font-family="monospace">n_layers_x    =  4</text>
+  <text x="452" y="342" font-size="11.5" fill="#778899" font-family="monospace">n_layers_y    =  16</text>
+  <text x="452" y="358" font-size="11.5" fill="#778899" font-family="monospace">failure_policy = "strict"</text>
+  <text x="720" y="326" font-size="10.5" fill="#334455" font-family="monospace">← min 2 to attach leads</text>
+  <text x="720" y="342" font-size="10.5" fill="#334455" font-family="monospace">← arc width ~0.15 Å⁻¹  needs ≥16</text>
+  <text x="720" y="358" font-size="10.5" fill="#cc4444" font-family="monospace">← hard-fail on invalid results</text>
+
+  <!-- Config block: [transport] -->
+  <rect x="440" y="373" width="500" height="38" rx="4" fill="#0c1008" stroke="#2a3a18" stroke-width="1"/>
+  <text x="452" y="391" font-size="11.5" fill="#88cc55" font-family="monospace">[transport]</text>
+  <text x="452" y="405" font-size="11.5" fill="#778899" font-family="monospace">thicknesses  =  [2,4,6,8,10,12,16,20,25]</text>
+  <text x="840" y="405" font-size="10.5" fill="#334455" font-family="monospace">← unit cells</text>
+</svg>

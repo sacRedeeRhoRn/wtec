@@ -1,0 +1,161 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" role="img" aria-label="wtec physics: topological semimetal film transport">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d0d1a"/>
+      <stop offset="100%" stop-color="#111827"/>
+    </linearGradient>
+    <linearGradient id="bulkGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1c1040"/>
+      <stop offset="100%" stop-color="#0e0a28"/>
+    </linearGradient>
+    <linearGradient id="arcTopGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00d2ff" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#00d2ff" stop-opacity="1"/>
+      <stop offset="75%" stop-color="#00d2ff" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#00d2ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="arcBotGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#ff6eb4" stop-opacity="0"/>
+      <stop offset="25%" stop-color="#ff6eb4" stop-opacity="1"/>
+      <stop offset="75%" stop-color="#ff6eb4" stop-opacity="1"/>
+      <stop offset="100%" stop-color="#ff6eb4" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="rhoTopo" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="100%" stop-color="#3a7bd5"/>
+    </linearGradient>
+    <filter id="glow4">
+      <feGaussianBlur stdDeviation="4" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="960" height="440" fill="url(#bg)"/>
+
+  <!-- ════════════════════════════════════════════════════ -->
+  <!--  LEFT PANEL — slab cross-section                    -->
+  <!-- ════════════════════════════════════════════════════ -->
+
+  <!-- Panel heading -->
+  <text x="248" y="30" font-size="15" fill="#8899bb" font-family="monospace" text-anchor="middle" letter-spacing="1">TOPOLOGICAL SEMIMETAL FILM</text>
+
+  <!-- Slab body -->
+  <rect x="60" y="50" width="376" height="220" rx="4" fill="url(#bulkGrad)" stroke="#2a1a60" stroke-width="1.5"/>
+
+  <!-- Bulk Weyl nodes: two chiral pairs -->
+  <!-- W1 pair -->
+  <circle cx="168" cy="160" r="10" fill="#ff4e6a" opacity="0.9" filter="url(#glow4)"/>
+  <circle cx="220" cy="160" r="10" fill="#00cfff" opacity="0.9" filter="url(#glow4)"/>
+  <!-- W1 connecting arrow -->
+  <line x1="178" y1="160" x2="210" y2="160" stroke="#ffffff" stroke-width="1" stroke-dasharray="3,2" opacity="0.4"/>
+  <!-- W2 pair -->
+  <circle cx="308" cy="160" r="10" fill="#ff4e6a" opacity="0.9" filter="url(#glow4)"/>
+  <circle cx="248" cy="160" r="10" fill="#00cfff" opacity="0.9" filter="url(#glow4)"/>
+  <line x1="258" y1="160" x2="298" y2="160" stroke="#ffffff" stroke-width="1" stroke-dasharray="3,2" opacity="0.4"/>
+
+  <!-- Weyl node labels -->
+  <text x="168" y="157" font-size="10" fill="white" text-anchor="middle" font-family="sans-serif">+</text>
+  <text x="220" y="157" font-size="10" fill="white" text-anchor="middle" font-family="sans-serif">−</text>
+  <text x="248" y="157" font-size="10" fill="white" text-anchor="middle" font-family="sans-serif">+</text>
+  <text x="308" y="157" font-size="10" fill="white" text-anchor="middle" font-family="sans-serif">−</text>
+  <text x="238" y="195" font-size="11" fill="#445577" font-family="monospace" text-anchor="middle">Weyl nodes  (bulk)</text>
+
+  <!-- Top surface: Fermi arc -->
+  <rect x="60" y="47" width="376" height="12" rx="3" fill="#001a30" opacity="0.7"/>
+  <path d="M 72,53 C 150,35 310,35 424,53"
+        fill="none" stroke="url(#arcTopGrad)" stroke-width="5" filter="url(#glow4)"/>
+
+  <!-- Bottom surface: Fermi arc -->
+  <rect x="60" y="261" width="376" height="12" rx="3" fill="#1a0020" opacity="0.7"/>
+  <path d="M 72,267 C 150,285 310,285 424,267"
+        fill="none" stroke="url(#arcBotGrad)" stroke-width="5" filter="url(#glow4)"/>
+
+  <!-- Surface labels -->
+  <text x="248" y="44" font-size="12" fill="#00cfff" font-family="monospace" text-anchor="middle">Fermi arc  (top surface)</text>
+  <text x="248" y="295" font-size="12" fill="#ff6eb4" font-family="monospace" text-anchor="middle">Fermi arc  (bottom surface)</text>
+
+  <!-- Side annotation: current flow direction -->
+  <line x1="448" y1="55" x2="448" y2="265" stroke="#334455" stroke-width="1" stroke-dasharray="3,4"/>
+  <polygon points="448,55 443,68 453,68" fill="#334455"/>
+  <polygon points="448,265 443,252 453,252" fill="#334455"/>
+  <text x="462" y="165" font-size="12" fill="#445566" font-family="monospace" writing-mode="tb" transform="rotate(90,462,165)">d  (film thickness)</text>
+
+  <!-- Transport current arrow (left) -->
+  <path d="M 30,160 L 55,160" stroke="#ffcc44" stroke-width="2.5"/>
+  <polygon points="55,160 45,155 45,165" fill="#ffcc44"/>
+  <text x="14" y="155" font-size="11" fill="#ffcc44" font-family="monospace">I</text>
+
+  <!-- Bottom label: physics statement -->
+  <text x="248" y="320" font-size="12" fill="#556677" font-family="monospace" text-anchor="middle">as  d → 0,  arc states dominate  →  ρ  decreases</text>
+  <text x="248" y="338" font-size="12" fill="#334455" font-family="monospace" text-anchor="middle">(opposite to trivial metals  where  ρ  increases)</text>
+
+  <!-- ════════════════════════════════════════════════════ -->
+  <!--  RIGHT PANEL — ρ(d) signature                       -->
+  <!-- ════════════════════════════════════════════════════ -->
+
+  <text x="728" y="30" font-size="15" fill="#8899bb" font-family="monospace" text-anchor="middle" letter-spacing="1">TRANSPORT SIGNATURE</text>
+
+  <!-- Plot box -->
+  <rect x="530" y="48" width="400" height="260" rx="4" fill="#08080f" stroke="#1a1a30" stroke-width="1"/>
+
+  <!-- Plot axes -->
+  <line x1="575" y1="278" x2="905" y2="278" stroke="#2a2a4a" stroke-width="1.5"/>
+  <line x1="575" y1="278" x2="575" y2="62" stroke="#2a2a4a" stroke-width="1.5"/>
+
+  <!-- Axis arrows -->
+  <polygon points="905,278 893,273 893,283" fill="#2a2a4a"/>
+  <polygon points="575,62 570,75 580,75" fill="#2a2a4a"/>
+
+  <!-- Axis labels -->
+  <text x="912" y="282" font-size="14" fill="#556677" font-family="monospace" font-style="italic">d</text>
+  <text x="558" y="60" font-size="14" fill="#556677" font-family="monospace" font-style="italic">ρ</text>
+
+  <!-- Grid (faint) -->
+  <line x1="575" y1="228" x2="905" y2="228" stroke="#111120" stroke-width="1"/>
+  <line x1="575" y1="178" x2="905" y2="178" stroke="#111120" stroke-width="1"/>
+  <line x1="575" y1="128" x2="905" y2="128" stroke="#111120" stroke-width="1"/>
+
+  <!-- Fuchs-Sondheimer (trivial metal): ρ increases as d→0 -->
+  <path d="M 590,258  C 660,240 760,185 890,95"
+        fill="none" stroke="#666688" stroke-width="2" stroke-dasharray="9,5"/>
+
+  <!-- Topological pristine: ρ decreases as d→0 (arc-dominated) -->
+  <path d="M 590,100  C 680,130 770,188 890,250"
+        fill="none" stroke="#00d2ff" stroke-width="3" filter="url(#glow4)"/>
+
+  <!-- Topological defect: higher ρ, less decrease (arcs scattered) -->
+  <path d="M 590,120  C 680,148 770,200 890,255"
+        fill="none" stroke="#ff6eb4" stroke-width="2.5"/>
+
+  <!-- Data dots on pristine -->
+  <g fill="#00d2ff" filter="url(#glow4)">
+    <circle cx="618" cy="106" r="4.5"/>
+    <circle cx="680" cy="124" r="4.5"/>
+    <circle cx="742" cy="155" r="4.5"/>
+    <circle cx="810" cy="195" r="4.5"/>
+    <circle cx="870" cy="238" r="4.5"/>
+  </g>
+  <!-- Data dots on defect -->
+  <g fill="#ff6eb4">
+    <circle cx="618" cy="125" r="3.5"/>
+    <circle cx="680" cy="148" r="3.5"/>
+    <circle cx="742" cy="174" r="3.5"/>
+    <circle cx="810" cy="206" r="3.5"/>
+    <circle cx="870" cy="245" r="3.5"/>
+  </g>
+
+  <!-- Legend -->
+  <line x1="600" y1="312" x2="628" y2="312" stroke="#00d2ff" stroke-width="3"/>
+  <text x="634" y="316" font-size="12" fill="#00d2ff" font-family="monospace">pristine  (topological)</text>
+  <line x1="600" y1="332" x2="628" y2="332" stroke="#ff6eb4" stroke-width="2.5"/>
+  <text x="634" y="336" font-size="12" fill="#ff6eb4" font-family="monospace">defect  (arcs scattered)</text>
+  <line x1="600" y1="352" x2="628" y2="352" stroke="#666688" stroke-width="2" stroke-dasharray="6,4"/>
+  <text x="634" y="356" font-size="12" fill="#666688" font-family="monospace">Fuchs–Sondheimer  (trivial)</text>
+
+  <!-- Trend arrows on plot -->
+  <text x="738" y="82" font-size="11" fill="#00d2ff" font-family="monospace" text-anchor="middle">↓  arcs dominate</text>
+  <text x="738" y="400" font-size="11" fill="#445566" font-family="monospace" text-anchor="middle">↑  surface scattering</text>
+
+  <!-- Panel border -->
+  <rect x="530" y="298" width="400" height="80" rx="4" fill="#09090e" stroke="#1a1a30" stroke-width="1"/>
+</svg>

@@ -1,0 +1,224 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 500" role="img" aria-label="wtec full workflow pipeline">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a0a14"/>
+      <stop offset="100%" stop-color="#0d1020"/>
+    </linearGradient>
+    <!-- Stage box gradients -->
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a2040"/>
+      <stop offset="100%" stop-color="#0f1530"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0d2a20"/>
+      <stop offset="100%" stop-color="#091a14"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#25103a"/>
+      <stop offset="100%" stop-color="#180a28"/>
+    </linearGradient>
+    <linearGradient id="g4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2a1020"/>
+      <stop offset="100%" stop-color="#1a0818"/>
+    </linearGradient>
+    <linearGradient id="g5" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1a2010"/>
+      <stop offset="100%" stop-color="#101408"/>
+    </linearGradient>
+    <linearGradient id="g6" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#301810"/>
+      <stop offset="100%" stop-color="#1e0e08"/>
+    </linearGradient>
+    <!-- Arrow gradient -->
+    <linearGradient id="arrowG" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#3a4a6a"/>
+      <stop offset="100%" stop-color="#4a3a6a"/>
+    </linearGradient>
+    <!-- Vertical arrow -->
+    <linearGradient id="arrowV" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#3a4a6a"/>
+      <stop offset="100%" stop-color="#4a3a6a"/>
+    </linearGradient>
+    <filter id="glow3">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="960" height="500" fill="url(#bg)"/>
+
+  <!-- Title -->
+  <text x="480" y="28" font-size="15" fill="#445566" font-family="monospace" text-anchor="middle" letter-spacing="2">wtec  PIPELINE</text>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- ROW 1: three boxes side by side                    -->
+  <!-- ─────────────────────────────────────────────────── -->
+
+  <!-- BOX 1: Crystal / Slab geometry -->
+  <rect x="30" y="48" width="252" height="130" rx="8" fill="url(#g1)" stroke="#2a3a6a" stroke-width="1.5"/>
+  <text x="156" y="70" font-size="13" fill="#6688cc" font-family="monospace" text-anchor="middle" letter-spacing="1">1 · STRUCTURE</text>
+  <!-- lattice hint -->
+  <g fill="none" stroke="#3a4a7a" stroke-width="1">
+    <line x1="70" y1="110" x2="242" y2="110"/>
+    <line x1="70" y1="130" x2="242" y2="130"/>
+    <line x1="70" y1="150" x2="242" y2="150"/>
+    <line x1="100" y1="90" x2="100" y2="165"/>
+    <line x1="140" y1="90" x2="140" y2="165"/>
+    <line x1="180" y1="90" x2="180" y2="165"/>
+    <line x1="220" y1="90" x2="220" y2="165"/>
+  </g>
+  <!-- atom dots at intersections -->
+  <g fill="#5577bb" opacity="0.8">
+    <circle cx="100" cy="110" r="3.5"/>  <circle cx="140" cy="110" r="3.5"/>
+    <circle cx="180" cy="110" r="3.5"/>  <circle cx="220" cy="110" r="3.5"/>
+    <circle cx="100" cy="130" r="3.5"/>  <circle cx="140" cy="130" r="3.5"/>
+    <circle cx="180" cy="130" r="3.5"/>  <circle cx="220" cy="130" r="3.5"/>
+    <circle cx="100" cy="150" r="3.5"/>  <circle cx="140" cy="150" r="3.5"/>
+    <circle cx="180" cy="150" r="3.5"/>  <circle cx="220" cy="150" r="3.5"/>
+  </g>
+  <text x="156" y="170" font-size="10.5" fill="#445577" font-family="monospace" text-anchor="middle">wtec init  ·  slab-gen</text>
+  <text x="156" y="184" font-size="10" fill="#334455" font-family="monospace" text-anchor="middle">SiO₂ / TaP / SiO₂  heterostructure</text>
+
+  <!-- arrow 1→2 -->
+  <line x1="283" y1="113" x2="340" y2="113" stroke="url(#arrowG)" stroke-width="2"/>
+  <polygon points="340,113 330,108 330,118" fill="#3a4a7a"/>
+
+  <!-- BOX 2: DFT — SIESTA -->
+  <rect x="342" y="48" width="252" height="130" rx="8" fill="url(#g2)" stroke="#1a4a30" stroke-width="1.5"/>
+  <text x="468" y="70" font-size="13" fill="#44bb88" font-family="monospace" text-anchor="middle" letter-spacing="1">2 · DFT  (SIESTA)</text>
+  <!-- SCF cycle icon -->
+  <path d="M 428,128 C 428,103 448,88 468,88 C 488,88 508,103 508,128 C 508,148 493,162 468,162"
+        fill="none" stroke="#2a8a60" stroke-width="2.5" stroke-linecap="round"/>
+  <polygon points="468,162 460,150 476,150" fill="#2a8a60"/>
+  <!-- convergence tick -->
+  <polyline points="418,120 432,134 460,100" fill="none" stroke="#44dd99" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="468" y="170" font-size="10.5" fill="#336644" font-family="monospace" text-anchor="middle">SCF + SOC  +  NSCF</text>
+  <text x="468" y="184" font-size="10" fill="#224433" font-family="monospace" text-anchor="middle">k-mesh  [6,6,6] → [8,8,8]</text>
+
+  <!-- arrow 2→3 -->
+  <line x1="595" y1="113" x2="652" y2="113" stroke="url(#arrowG)" stroke-width="2"/>
+  <polygon points="652,113 642,108 642,118" fill="#3a4a7a"/>
+
+  <!-- BOX 3: Wannier90 -->
+  <rect x="654" y="48" width="276" height="130" rx="8" fill="url(#g3)" stroke="#3a1a5a" stroke-width="1.5"/>
+  <text x="792" y="70" font-size="13" fill="#aa88ee" font-family="monospace" text-anchor="middle" letter-spacing="1">3 · WANNIER90</text>
+  <!-- orbital blobs -->
+  <ellipse cx="748" cy="125" rx="30" ry="18" fill="none" stroke="#7744cc" stroke-width="2" opacity="0.7"/>
+  <ellipse cx="800" cy="125" rx="30" ry="18" fill="none" stroke="#aa55ee" stroke-width="1.5" opacity="0.6"/>
+  <ellipse cx="855" cy="125" rx="28" ry="18" fill="none" stroke="#7744cc" stroke-width="2" opacity="0.7"/>
+  <circle cx="800" cy="125" r="5" fill="#aa88ee" opacity="0.8" filter="url(#glow3)"/>
+  <text x="792" y="170" font-size="10.5" fill="#5a3a7a" font-family="monospace" text-anchor="middle">disentanglement  +  localization</text>
+  <text x="792" y="184" font-size="10" fill="#3a2255" font-family="monospace" text-anchor="middle">convergence gate  before  proceed</text>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- Arrow row 1 → row 2 (vertical, from box 3 down)   -->
+  <!-- ─────────────────────────────────────────────────── -->
+
+  <!-- Vertical arrow from row-1 center down to row-2 -->
+  <line x1="480" y1="200" x2="480" y2="238" stroke="url(#arrowV)" stroke-width="2"/>
+  <polygon points="480,238 475,228 485,228" fill="#3a4a6a"/>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- ROW 2: three boxes side by side                    -->
+  <!-- ─────────────────────────────────────────────────── -->
+
+  <!-- BOX 4: Tight-binding model H(R) -->
+  <rect x="30" y="248" width="252" height="130" rx="8" fill="url(#g4)" stroke="#4a1a2a" stroke-width="1.5"/>
+  <text x="156" y="270" font-size="13" fill="#ee6699" font-family="monospace" text-anchor="middle" letter-spacing="1">4 · TIGHT-BINDING</text>
+  <!-- Matrix grid -->
+  <g fill="none" stroke="#662244" stroke-width="1">
+    <rect x="80" y="285" width="60" height="60" rx="2"/>
+    <line x1="80" y1="305" x2="140" y2="305"/><line x1="80" y1="325" x2="140" y2="325"/>
+    <line x1="100" y1="285" x2="100" y2="345"/><line x1="120" y1="285" x2="120" y2="345"/>
+  </g>
+  <!-- non-zero matrix elements -->
+  <g fill="#aa3366" opacity="0.7">
+    <rect x="82"  y="287" width="17" height="17" rx="1"/>
+    <rect x="102" y="307" width="17" height="17" rx="1"/>
+    <rect x="122" y="327" width="17" height="17" rx="1"/>
+    <rect x="122" y="287" width="17" height="17" rx="1"/>
+    <rect x="82"  y="327" width="17" height="17" rx="1"/>
+  </g>
+  <text x="180" y="312" font-size="14" fill="#883355" font-family="monospace">H(R)</text>
+  <text x="156" y="370" font-size="10.5" fill="#552233" font-family="monospace" text-anchor="middle">Wannier HR  →  slab  builder</text>
+  <text x="156" y="384" font-size="10" fill="#3a1a22" font-family="monospace" text-anchor="middle">n_layers_x ≥ 2,  n_layers_y ≥ 16</text>
+
+  <!-- arrow 4→5 -->
+  <line x1="283" y1="313" x2="340" y2="313" stroke="url(#arrowG)" stroke-width="2"/>
+  <polygon points="340,313 330,308 330,318" fill="#3a4a7a"/>
+
+  <!-- BOX 5: Kwant transport -->
+  <rect x="342" y="248" width="252" height="130" rx="8" fill="url(#g5)" stroke="#2a3a1a" stroke-width="1.5"/>
+  <text x="468" y="270" font-size="13" fill="#88cc55" font-family="monospace" text-anchor="middle" letter-spacing="1">5 · TRANSPORT</text>
+  <!-- Lead + scattering region schematic -->
+  <rect x="370" y="292" width="50" height="44" rx="3" fill="#1a2a10" stroke="#3a5a20" stroke-width="1.2"/>
+  <rect x="424" y="280" width="88" height="68" rx="3" fill="#223010" stroke="#4a6a28" stroke-width="1.5"/>
+  <rect x="516" y="292" width="50" height="44" rx="3" fill="#1a2a10" stroke="#3a5a20" stroke-width="1.2"/>
+  <!-- current arrows through leads -->
+  <line x1="358" y1="314" x2="372" y2="314" stroke="#88cc55" stroke-width="2"/>
+  <polygon points="372,314 365,310 365,318" fill="#88cc55"/>
+  <line x1="564" y1="314" x2="578" y2="314" stroke="#88cc55" stroke-width="2"/>
+  <polygon points="578,314 571,310 571,318" fill="#88cc55"/>
+  <text x="384" y="350" font-size="10.5" fill="#3a5522" font-family="monospace">L</text>
+  <text x="466" y="355" font-size="10.5" fill="#4a6a28" font-family="monospace" text-anchor="middle">scatter</text>
+  <text x="534" y="350" font-size="10.5" fill="#3a5522" font-family="monospace">R</text>
+  <text x="468" y="370" font-size="10.5" fill="#334422" font-family="monospace" text-anchor="middle">Kwant  S-matrix  →  G(E_F)</text>
+  <text x="468" y="384" font-size="10" fill="#223318" font-family="monospace" text-anchor="middle">disorder ensemble  ×  thickness sweep</text>
+
+  <!-- arrow 5→6 -->
+  <line x1="595" y1="313" x2="652" y2="313" stroke="url(#arrowG)" stroke-width="2"/>
+  <polygon points="652,313 642,308 642,318" fill="#3a4a7a"/>
+
+  <!-- BOX 6: Outputs -->
+  <rect x="654" y="248" width="276" height="130" rx="8" fill="url(#g6)" stroke="#4a2a1a" stroke-width="1.5"/>
+  <text x="792" y="270" font-size="13" fill="#ee9955" font-family="monospace" text-anchor="middle" letter-spacing="1">6 · RESULTS</text>
+  <!-- mini ρ(d) curve -->
+  <g transform="translate(668,285)">
+    <line x1="16" y1="88" x2="120" y2="88" stroke="#444" stroke-width="1"/>
+    <line x1="16" y1="88" x2="16" y2="10" stroke="#444" stroke-width="1"/>
+    <path d="M 20,22 C 50,34 80,62 115,82" fill="none" stroke="#00d2ff" stroke-width="2.5"/>
+    <path d="M 20,76 C 50,60 80,40 115,22" fill="none" stroke="#666" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <text x="66" y="100" font-size="9" fill="#556" font-family="monospace" text-anchor="middle">ρ(d)</text>
+  </g>
+  <!-- mini C(kz) staircase -->
+  <g transform="translate(790,285)">
+    <line x1="16" y1="88" x2="120" y2="88" stroke="#444" stroke-width="1"/>
+    <line x1="16" y1="88" x2="16" y2="10" stroke="#444" stroke-width="1"/>
+    <polyline points="20,70 40,70 40,48 65,48 65,25 90,25 90,48 110,48 110,70 120,70"
+              fill="none" stroke="#f5576c" stroke-width="2.5" stroke-linejoin="round"/>
+    <text x="66" y="100" font-size="9" fill="#556" font-family="monospace" text-anchor="middle">C(k_z)</text>
+  </g>
+  <text x="792" y="375" font-size="10.5" fill="#5a3020" font-family="monospace" text-anchor="middle">topology score  ·  arc conductance</text>
+
+  <!-- ─────────────────────────────────────────────────── -->
+  <!-- Bottom: wtec commands row                          -->
+  <!-- ─────────────────────────────────────────────────── -->
+  <rect x="30" y="408" width="900" height="72" rx="8" fill="#0b0b16" stroke="#1a1a2a" stroke-width="1"/>
+  <text x="480" y="430" font-size="12" fill="#334455" font-family="monospace" text-anchor="middle">COMMANDS</text>
+
+  <!-- command pills -->
+  <rect x="55"  y="442" width="120" height="26" rx="13" fill="#0f1525" stroke="#2a3a5a" stroke-width="1"/>
+  <text x="115" y="459" font-size="11" fill="#6688cc" font-family="monospace" text-anchor="middle">wtec init</text>
+
+  <rect x="200" y="442" width="140" height="26" rx="13" fill="#0d1e16" stroke="#1a4a30" stroke-width="1"/>
+  <text x="270" y="459" font-size="11" fill="#44bb88" font-family="monospace" text-anchor="middle">wtec slab-gen</text>
+
+  <rect x="360" y="442" width="130" height="26" rx="13" fill="#170e28" stroke="#3a1a5a" stroke-width="1"/>
+  <text x="425" y="459" font-size="11" fill="#aa88ee" font-family="monospace" text-anchor="middle">wtec defect</text>
+
+  <rect x="508" y="442" width="110" height="26" rx="13" fill="#1a0a14" stroke="#4a1a2a" stroke-width="1"/>
+  <text x="563" y="459" font-size="11" fill="#ee6699" font-family="monospace" text-anchor="middle">wtec run</text>
+
+  <rect x="636" y="442" width="130" height="26" rx="13" fill="#150e08" stroke="#3a2810" stroke-width="1"/>
+  <text x="701" y="459" font-size="11" fill="#ee9955" font-family="monospace" text-anchor="middle">wtec report</text>
+
+  <rect x="784" y="442" width="130" height="26" rx="13" fill="#0c1008" stroke="#2a3a18" stroke-width="1"/>
+  <text x="849" y="459" font-size="11" fill="#88cc55" font-family="monospace" text-anchor="middle">wtec status</text>
+
+  <!-- Connecting flow dots between commands -->
+  <text x="186" y="458" font-size="14" fill="#334" font-family="monospace">→</text>
+  <text x="346" y="458" font-size="14" fill="#334" font-family="monospace">→</text>
+  <text x="494" y="458" font-size="14" fill="#334" font-family="monospace">→</text>
+  <text x="622" y="458" font-size="14" fill="#334" font-family="monospace">→</text>
+  <text x="770" y="458" font-size="14" fill="#334" font-family="monospace">→</text>
+</svg>

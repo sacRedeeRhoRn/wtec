@@ -1,0 +1,238 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 480" role="img" aria-label="wtec expected output products">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#08080f"/>
+      <stop offset="100%" stop-color="#0d0d1a"/>
+    </linearGradient>
+    <linearGradient id="arcFit" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00d2ff"/>
+      <stop offset="100%" stop-color="#3a7bd5"/>
+    </linearGradient>
+    <filter id="glow3">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="960" height="480" fill="url(#bg)"/>
+
+  <text x="480" y="26" font-size="15" fill="#445566" font-family="monospace" text-anchor="middle" letter-spacing="2">EXPECTED  OUTPUTS</text>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  PANEL A — ρ(d) three-curve plot                         -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+
+  <text x="152" y="52" font-size="12" fill="#5577aa" font-family="monospace" text-anchor="middle" letter-spacing="1">A  ·  RESISTIVITY  vs  THICKNESS</text>
+
+  <!-- Plot frame -->
+  <rect x="30" y="60" width="244" height="195" rx="4" fill="#07070e" stroke="#1a1a2a" stroke-width="1"/>
+
+  <!-- Axes -->
+  <line x1="56"  y1="232" x2="260" y2="232" stroke="#222238" stroke-width="1.5"/>
+  <line x1="56"  y1="232" x2="56"  y2="70"  stroke="#222238" stroke-width="1.5"/>
+  <polygon points="260,232 250,227 250,237" fill="#222238"/>
+  <polygon points="56,70 51,82 61,82" fill="#222238"/>
+
+  <!-- Axis labels -->
+  <text x="268" y="236" font-size="12" fill="#445566" font-family="monospace" font-style="italic">d</text>
+  <text x="42"  y="68"  font-size="12" fill="#445566" font-family="monospace" font-style="italic">ρ</text>
+
+  <!-- Grid -->
+  <line x1="56" y1="197" x2="260" y2="197" stroke="#111122" stroke-width="1"/>
+  <line x1="56" y1="162" x2="260" y2="162" stroke="#111122" stroke-width="1"/>
+  <line x1="56" y1="127" x2="260" y2="127" stroke="#111122" stroke-width="1"/>
+  <line x1="56" y1="92"  x2="260" y2="92"  stroke="#111122" stroke-width="1"/>
+
+  <!-- Fuchs-Sondheimer: increasing -->
+  <path d="M 65,220 C 110,205 170,165 252,88"
+        fill="none" stroke="#555577" stroke-width="1.8" stroke-dasharray="7,4"/>
+
+  <!-- Pristine: decreasing -->
+  <path d="M 65,88  C 110,108 170,162 252,220"
+        fill="none" stroke="#00d2ff" stroke-width="3" filter="url(#glow3)"/>
+  <circle cx="83"  cy="94"  r="3.5" fill="#00d2ff"/>
+  <circle cx="120" cy="112" r="3.5" fill="#00d2ff"/>
+  <circle cx="160" cy="145" r="3.5" fill="#00d2ff"/>
+  <circle cx="200" cy="180" r="3.5" fill="#00d2ff"/>
+  <circle cx="240" cy="214" r="3.5" fill="#00d2ff"/>
+
+  <!-- Defect: higher, less decreasing -->
+  <path d="M 65,105 C 110,126 170,172 252,222"
+        fill="none" stroke="#ff6eb4" stroke-width="2.2"/>
+  <circle cx="83"  cy="111" r="3" fill="#ff6eb4"/>
+  <circle cx="120" cy="130" r="3" fill="#ff6eb4"/>
+  <circle cx="160" cy="158" r="3" fill="#ff6eb4"/>
+  <circle cx="200" cy="188" r="3" fill="#ff6eb4"/>
+  <circle cx="240" cy="217" r="3" fill="#ff6eb4"/>
+
+  <!-- Legend -->
+  <line x1="40" y1="275" x2="62" y2="275" stroke="#00d2ff" stroke-width="2.5"/>
+  <text x="68" y="279" font-size="10.5" fill="#00d2ff" font-family="monospace">pristine (arc-dominated)</text>
+  <line x1="40" y1="292" x2="62" y2="292" stroke="#ff6eb4" stroke-width="2"/>
+  <text x="68" y="296" font-size="10.5" fill="#ff6eb4" font-family="monospace">defect (arcs suppressed)</text>
+  <line x1="40" y1="309" x2="62" y2="309" stroke="#555577" stroke-width="1.8" stroke-dasharray="5,3"/>
+  <text x="68" y="313" font-size="10.5" fill="#555577" font-family="monospace">Fuchs-Sondheimer (trivial)</text>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  PANEL B — σ_sq two-channel fit                          -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+
+  <text x="500" y="52" font-size="12" fill="#5577aa" font-family="monospace" text-anchor="middle" letter-spacing="1">B  ·  TWO-CHANNEL  FIT</text>
+
+  <rect x="380" y="60" width="244" height="195" rx="4" fill="#07070e" stroke="#1a1a2a" stroke-width="1"/>
+
+  <!-- Axes -->
+  <line x1="406" y1="232" x2="610" y2="232" stroke="#222238" stroke-width="1.5"/>
+  <line x1="406" y1="232" x2="406" y2="70"  stroke="#222238" stroke-width="1.5"/>
+  <polygon points="610,232 600,227 600,237" fill="#222238"/>
+  <polygon points="406,70 401,82 411,82" fill="#222238"/>
+  <text x="618" y="236" font-size="12" fill="#445566" font-family="monospace" font-style="italic">d</text>
+  <text x="388" y="68"  font-size="11" fill="#445566" font-family="monospace">σ_sq</text>
+
+  <!-- Grid -->
+  <line x1="406" y1="197" x2="610" y2="197" stroke="#111122" stroke-width="1"/>
+  <line x1="406" y1="162" x2="610" y2="162" stroke="#111122" stroke-width="1"/>
+  <line x1="406" y1="127" x2="610" y2="127" stroke="#111122" stroke-width="1"/>
+  <line x1="406" y1="92"  x2="610" y2="92"  stroke="#111122" stroke-width="1"/>
+
+  <!-- Pristine conductance: G = σ_arc + σ_bulk·d -->
+  <path d="M 415,215 C 460,202 520,178 600,148"
+        fill="none" stroke="#00d2ff" stroke-width="2.5" opacity="0.6"/>
+  <!-- Linear fit line -->
+  <line x1="406" y1="224" x2="600" y2="143" stroke="#00d2ff" stroke-width="1.5" stroke-dasharray="6,3" opacity="0.7"/>
+
+  <!-- Defect conductance -->
+  <path d="M 415,225 C 460,215 520,195 600,172"
+        fill="none" stroke="#ff6eb4" stroke-width="2" opacity="0.6"/>
+  <line x1="406" y1="232" x2="600" y2="170" stroke="#ff6eb4" stroke-width="1.5" stroke-dasharray="6,3" opacity="0.6"/>
+
+  <!-- σ_arc intercept on y-axis -->
+  <circle cx="406" cy="224" r="5" fill="#00d2ff" filter="url(#glow3)"/>
+  <circle cx="406" cy="232" r="4" fill="#ff6eb4" opacity="0.8"/>
+
+  <!-- Bracket + label for Δσ_arc -->
+  <line x1="392" y1="224" x2="392" y2="232" stroke="#aaaacc" stroke-width="1.5" opacity="0.6"/>
+  <line x1="388" y1="224" x2="396" y2="224" stroke="#aaaacc" stroke-width="1.2" opacity="0.6"/>
+  <line x1="388" y1="232" x2="396" y2="232" stroke="#aaaacc" stroke-width="1.2" opacity="0.6"/>
+  <text x="358" y="230" font-size="9" fill="#7788aa" font-family="monospace">σ_arc</text>
+
+  <!-- Data dots -->
+  <g fill="#00d2ff"><circle cx="430" cy="213" r="3"/><circle cx="468" cy="200" r="3"/><circle cx="510" cy="185" r="3"/><circle cx="550" cy="167" r="3"/><circle cx="590" cy="152" r="3"/></g>
+  <g fill="#ff6eb4"><circle cx="430" cy="223" r="2.5"/><circle cx="468" cy="212" r="2.5"/><circle cx="510" cy="197" r="2.5"/><circle cx="550" cy="182" r="2.5"/><circle cx="590" cy="174" r="2.5"/></g>
+
+  <!-- Equation annotation -->
+  <text x="470" y="118" font-size="10.5" fill="#2a4a5a" font-family="monospace" text-anchor="middle">σ_sq = σ_arc_2D  +  σ_bulk · d</text>
+  <text x="470" y="132" font-size="9.5"  fill="#1e3040" font-family="monospace" text-anchor="middle">intercept  &gt;  0  ↔  topological</text>
+
+  <!-- Legend -->
+  <line x1="390" y1="275" x2="412" y2="275" stroke="#00d2ff" stroke-width="2.5"/>
+  <text x="418" y="279" font-size="10.5" fill="#00d2ff" font-family="monospace">pristine  σ_arc_2D = 1.8 e²/h ✓</text>
+  <line x1="390" y1="293" x2="412" y2="293" stroke="#ff6eb4" stroke-width="2"/>
+  <text x="418" y="297" font-size="10.5" fill="#ff6eb4" font-family="monospace">defect   σ_arc_2D = 0.4 e²/h</text>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  PANEL C — Chern profile C(kz)                           -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+
+  <text x="830" y="52" font-size="12" fill="#5577aa" font-family="monospace" text-anchor="middle" letter-spacing="1">C  ·  CHERN  PROFILE</text>
+
+  <rect x="730" y="60" width="210" height="195" rx="4" fill="#07070e" stroke="#1a1a2a" stroke-width="1"/>
+
+  <!-- Axes -->
+  <line x1="752" y1="232" x2="928" y2="232" stroke="#222238" stroke-width="1.5"/>
+  <line x1="752" y1="232" x2="752" y2="70"  stroke="#222238" stroke-width="1.5"/>
+  <polygon points="928,232 918,227 918,237" fill="#222238"/>
+  <polygon points="752,70 747,82 757,82" fill="#222238"/>
+  <text x="934" y="236" font-size="11" fill="#445566" font-family="monospace" font-style="italic">k_z</text>
+  <text x="735" y="68"  font-size="12" fill="#445566" font-family="monospace" font-style="italic">C</text>
+
+  <!-- Zero line -->
+  <line x1="752" y1="172" x2="928" y2="172" stroke="#1a1a2a" stroke-width="1" stroke-dasharray="4,4"/>
+  <!-- C=+2 line guide -->
+  <line x1="752" y1="112" x2="928" y2="112" stroke="#1a1a2a" stroke-width="1"/>
+
+  <!-- Level labels -->
+  <text x="740" y="176" font-size="10" fill="#334" font-family="monospace" text-anchor="end">0</text>
+  <text x="740" y="116" font-size="10" fill="#334" font-family="monospace" text-anchor="end">+2</text>
+  <text x="740" y="231" font-size="10" fill="#334" font-family="monospace" text-anchor="end">−2</text>
+
+  <!-- kz axis ticks -->
+  <line x1="752" y1="232" x2="752" y2="236" stroke="#334" stroke-width="1"/>
+  <text x="752" y="246" font-size="9" fill="#334" font-family="monospace" text-anchor="middle">0</text>
+  <line x1="840" y1="232" x2="840" y2="236" stroke="#334" stroke-width="1"/>
+  <text x="840" y="246" font-size="9" fill="#334" font-family="monospace" text-anchor="middle">0.5</text>
+  <line x1="928" y1="232" x2="928" y2="236" stroke="#334" stroke-width="1"/>
+  <text x="928" y="246" font-size="9" fill="#334" font-family="monospace" text-anchor="middle">1</text>
+
+  <!-- Chern staircase: 0 → +2 plateau → 0 (two chiral pairs for TaP) -->
+  <!-- W1 nodes at kz≈0.32,0.38: x = 752 + kz*176 -->
+  <!-- W1a: kz=0.32 → x=808; W1b: kz=0.38 → x=819; W2a: kz=0.62 → x=861; W2b: kz=0.68 → x=872 -->
+  <polyline
+    points="757,172  807,172  807,141  818,141  818,112  862,112  862,141  872,141  872,172  926,172"
+    fill="none" stroke="#f5576c" stroke-width="2.8" stroke-linejoin="round" filter="url(#glow3)"/>
+
+  <!-- Weyl node dots on kz axis -->
+  <circle cx="807" cy="232" r="4" fill="#4facfe" filter="url(#glow3)"/>
+  <circle cx="818" cy="232" r="4" fill="#f5576c" filter="url(#glow3)"/>
+  <circle cx="862" cy="232" r="4" fill="#f5576c" filter="url(#glow3)"/>
+  <circle cx="872" cy="232" r="4" fill="#4facfe" filter="url(#glow3)"/>
+
+  <!-- Weyl node chirality -->
+  <text x="807" y="248" font-size="9" fill="#4facfe" font-family="sans-serif" text-anchor="middle">+</text>
+  <text x="818" y="248" font-size="9" fill="#f5576c" font-family="sans-serif" text-anchor="middle">+</text>
+  <text x="862" y="248" font-size="9" fill="#f5576c" font-family="sans-serif" text-anchor="middle">−</text>
+  <text x="872" y="248" font-size="9" fill="#4facfe" font-family="sans-serif" text-anchor="middle">−</text>
+
+  <!-- kz=0.5 probe line -->
+  <line x1="840" y1="70" x2="840" y2="232" stroke="#888844" stroke-width="1" stroke-dasharray="3,4" opacity="0.6"/>
+  <text x="843" y="84" font-size="8.5" fill="#888844" font-family="monospace">probe</text>
+  <circle cx="840" cy="112" r="4" fill="#ffcc44" filter="url(#glow3)"/>
+  <text x="855" y="116" font-size="9" fill="#ffcc44" font-family="monospace">C=+2</text>
+
+  <!-- ══════════════════════════════════════════════════════════ -->
+  <!--  BOTTOM: topology score breakdown                         -->
+  <!-- ══════════════════════════════════════════════════════════ -->
+
+  <text x="480" y="346" font-size="12" fill="#5577aa" font-family="monospace" text-anchor="middle" letter-spacing="1">D  ·  TOPOLOGY  SCORE  BREAKDOWN</text>
+
+  <rect x="30" y="356" width="900" height="100" rx="6" fill="#08080e" stroke="#151525" stroke-width="1"/>
+
+  <!-- Score components as horizontal bars -->
+  <!-- S_arc -->
+  <text x="50"  y="380" font-size="11" fill="#556677" font-family="monospace">S_arc</text>
+  <rect x="130" y="367" width="240" height="18" rx="4" fill="#0d0d1a"/>
+  <rect x="130" y="367" width="192" height="18" rx="4" fill="#00d2ff" opacity="0.5"/>
+  <text x="328" y="380" font-size="10" fill="#00d2ff" font-family="monospace">  0.80  ← arc conductance signature</text>
+
+  <!-- S_topo -->
+  <text x="50"  y="403" font-size="11" fill="#556677" font-family="monospace">S_topo</text>
+  <rect x="130" y="390" width="240" height="18" rx="4" fill="#0d0d1a"/>
+  <rect x="130" y="390" width="210" height="18" rx="4" fill="#aa88ee" opacity="0.5"/>
+  <text x="348" y="403" font-size="10" fill="#aa88ee" font-family="monospace">  0.88  ← C(kz) Weyl signature</text>
+
+  <!-- S_severity -->
+  <text x="50"  y="426" font-size="11" fill="#556677" font-family="monospace">severity</text>
+  <rect x="130" y="413" width="240" height="18" rx="4" fill="#0d0d1a"/>
+  <rect x="130" y="413" width="60" height="18" rx="4" fill="#ee9955" opacity="0.5"/>
+  <text x="196" y="426" font-size="10" fill="#ee9955" font-family="monospace">  0.25  ← defect perturbation</text>
+
+  <!-- S_total -->
+  <text x="50"  y="447" font-size="11" fill="#aaaacc" font-family="monospace">S_total</text>
+  <rect x="130" y="434" width="240" height="18" rx="4" fill="#0d0d1a"/>
+  <rect x="130" y="434" width="220" height="18" rx="4" fill="#ffffff" opacity="0.12"/>
+  <text x="358" y="447" font-size="10" fill="#ccccee" font-family="monospace">  0.91  ← combined topology score</text>
+
+  <!-- Score scale marker -->
+  <rect x="630" y="367" width="270" height="85" rx="4" fill="#0a0a14" stroke="#1a1a28" stroke-width="1"/>
+  <text x="765" y="384" font-size="10.5" fill="#334455" font-family="monospace" text-anchor="middle">score  ∈  [0, 1]</text>
+  <line x1="648" y1="420" x2="888" y2="420" stroke="#1a1a2a" stroke-width="1"/>
+  <text x="648" y="434" font-size="10" fill="#334" font-family="monospace">0</text>
+  <text x="762" y="434" font-size="10" fill="#334" font-family="monospace" text-anchor="middle">0.5</text>
+  <text x="882" y="434" font-size="10" fill="#334" font-family="monospace" text-anchor="end">1</text>
+  <!-- scale bar fill -->
+  <rect x="648" y="408" width="240" height="12" rx="2" fill="#0a0a16"/>
+  <rect x="648" y="408" width="218" height="12" rx="2" fill="#aa88ee" opacity="0.4"/>
+  <circle cx="866" cy="414" r="5" fill="#ffffff" opacity="0.6" filter="url(#glow3)"/>
+  <text x="875" y="418" font-size="9" fill="#aaaacc" font-family="monospace">0.91</text>
+  <text x="765" y="445" font-size="9.5" fill="#2a3a4a" font-family="monospace" text-anchor="middle">0.9 + strict mode → PASS</text>
+</svg>
