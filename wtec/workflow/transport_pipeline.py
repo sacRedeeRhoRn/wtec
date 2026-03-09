@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any, Callable
 
 import numpy as np
 
@@ -37,6 +38,11 @@ class TransportPipeline:
         n_layers_y: int = 4,
         carrier_density_m3: float | None = None,
         fermi_velocity_m_per_s: float | None = None,
+        progress_callback: Callable[..., None] | None = None,
+        log_detail: str = "minimal",
+        heartbeat_seconds: int = 20,
+        kwant_mode: str = "auto",
+        kwant_task_workers: int = 0,
     ) -> None:
         """
         Parameters
@@ -71,6 +77,21 @@ class TransportPipeline:
             else None
         )
         self._results: dict = {}
+        self._progress_callback = progress_callback
+        self.log_detail = str(log_detail).strip().lower() or "minimal"
+        self.heartbeat_seconds = max(5, int(heartbeat_seconds))
+        self.kwant_mode = str(kwant_mode).strip().lower() or "auto"
+        self.kwant_task_workers = max(0, int(kwant_task_workers))
+
+    def _emit(self, event: str, **payload: Any) -> None:
+        cb = self._progress_callback
+        if cb is None:
+            return
+        try:
+            cb(event=event, **payload)
+        except Exception:
+            # Transport progress logging must never break the physics run.
+            pass
 
     def run_thickness_scan(self) -> dict:
         """Compute ρ(d) for all disorder strengths.
@@ -80,7 +101,13 @@ class TransportPipeline:
         dict mapping disorder_strength → conductance_result_dict
         """
         results = {}
-        for W in self.disorder_strengths:
+        for idx, W in enumerate(self.disorder_strengths):
+            self._emit(
+                "thickness_scan_start",
+                disorder_strength=float(W),
+                index=int(idx),
+                total=int(len(self.disorder_strengths)),
+            )
             print(f"  Thickness scan W={W:.2f} eV...")
             res = compute_conductance_vs_thickness(
                 self.tb_model,
@@ -95,8 +122,20 @@ class TransportPipeline:
                 thickness_axis=self.thickness_axis,
                 n_layers_x=self.n_layers_x,
                 n_layers_y=self.n_layers_y,
+                progress_cb=self._progress_callback,
+                log_detail=self.log_detail,
+                heartbeat_seconds=self.heartbeat_seconds,
+                kwant_mode=self.kwant_mode,
+                task_workers=self.kwant_task_workers,
             )
             results[W] = res
+            self._emit(
+                "thickness_scan_done",
+                disorder_strength=float(W),
+                index=int(idx),
+                total=int(len(self.disorder_strengths)),
+                n_points=int(len(res.get("thickness_uc", []))),
+            )
         self._results["thickness_scan"] = results
         return results
 
@@ -114,6 +153,11 @@ class TransportPipeline:
             System lengths in unit cells. Default: 5..100 step 5.
         """
         lengths = np.array(lengths or list(range(5, 105, 5)))
+        self._emit(
+            "mfp_scan_start",
+            disorder_strength=float(disorder_strength),
+            n_lengths=int(len(lengths)),
+        )
         print(f"  MFP extraction W={disorder_strength:.2f} eV...")
 
         gL_data = compute_conductance_vs_length(
@@ -130,6 +174,11 @@ class TransportPipeline:
             n_jobs=self.n_jobs,
             base_seed=self.base_seed,
             lead_onsite_eV=self.lead_onsite_eV,
+            progress_cb=self._progress_callback,
+            log_detail=self.log_detail,
+            heartbeat_seconds=self.heartbeat_seconds,
+            kwant_mode=self.kwant_mode,
+            task_workers=self.kwant_task_workers,
         )
         cross_m2 = float(np.mean(gL_data["cross_section_m2"]))
 
@@ -172,10 +221,25 @@ class TransportPipeline:
             )
         mfp_result["G_vs_L"] = gL_data
         self._results["mfp"] = mfp_result
+        self._emit(
+            "mfp_scan_done",
+            disorder_strength=float(disorder_strength),
+            n_lengths=int(len(lengths)),
+            sigma_S_per_m=mfp_result.get("sigma_S_per_m"),
+            mfp_nm=mfp_result.get("mfp_nm"),
+        )
         return mfp_result
 
     def run_full(self) -> dict:
         """Run thickness scan + MFP extraction."""
+        self._emit(
+            "transport_run_start",
+            n_disorder=int(len(self.disorder_strengths)),
+            n_thickness=int(len(self.thicknesses)),
+            n_ensemble=int(self.n_ensemble),
+            kwant_mode=self.kwant_mode,
+            kwant_task_workers=int(self.kwant_task_workers),
+        )
         thickness_results = self.run_thickness_scan()
         # Use median disorder for MFP
         mid_W = self.disorder_strengths[len(self.disorder_strengths) // 2]
@@ -198,7 +262,17 @@ class TransportPipeline:
             "n_layers_y": self.n_layers_y,
             "carrier_density_m3": self.carrier_density_m3,
             "fermi_velocity_m_per_s": self.fermi_velocity_m_per_s,
+            "log_detail": self.log_detail,
+            "heartbeat_seconds": self.heartbeat_seconds,
+            "kwant_mode": self.kwant_mode,
+            "kwant_task_workers": self.kwant_task_workers,
         }
+        self._emit(
+            "transport_run_done",
+            n_disorder=int(len(self.disorder_strengths)),
+            n_thickness=int(len(self.thicknesses)),
+            n_ensemble=int(self.n_ensemble),
+        )
         return {"thickness_scan": thickness_results, "mfp": mfp_result, "meta": meta}
 
     @property

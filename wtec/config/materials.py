@@ -49,7 +49,9 @@ MATERIALS: dict[str, MaterialPreset] = {
         projections=["Ta:d", "P:p"],
         num_wann=16,               # 5 Ta-d + 3 P-p per formula unit × 2 (SOC)
         num_bands=36,
-        dis_win=(-4.0, 16.0),
+        # Keep enough states in the outer disentanglement window across all k
+        # points for SOC spinor runs (num_wann=32 in primitive TaP cells).
+        dis_win=(-12.0, 16.0),
         # Keep frozen window narrower to avoid over-constraining disentanglement
         # for thin-film slabs with many near-E_F bands.
         dis_froz_win=(-1.0, 0.2),
@@ -83,7 +85,8 @@ MATERIALS: dict[str, MaterialPreset] = {
         projections=["Nb:d", "P:p"],
         num_wann=16,
         num_bands=36,
-        dis_win=(-4.0, 16.0),
+        # Mirror TaP safety margin for NbP SOC spinor disentanglement.
+        dis_win=(-12.0, 16.0),
         dis_froz_win=(-1.0, 0.2),
         pseudopots={"Nb": "Nb.pbe-spn-rrkjus_psl.1.0.0.UPF",
                     "P":  "P.pbe-n-rrkjus_psl.1.0.0.UPF"},

@@ -66,6 +66,8 @@ def generate_script(
     mem_line = f"#PBS -l mem={int(config.memory_gb)}gb" if config.memory_gb else ""
     log_path = f"{config.work_dir.rstrip('/')}/{config.job_name}.log"
 
+    runtime_log_path = f"{config.work_dir.rstrip('/')}/wtec_job.log"
+
     script = f"""#!/bin/bash
 #PBS -N {config.job_name}
 #PBS -l nodes={config.n_nodes}:ppn={config.n_cores_per_node}
@@ -78,9 +80,13 @@ def generate_script(
 # ── environment ─────────────────────────────────────────────────────────────
 {module_lines}
 {env_lines}
+export PYTHONUNBUFFERED=1
 
 # ── working directory ────────────────────────────────────────────────────────
+set -euo pipefail
 cd {config.work_dir}
+exec > >(tee -a {runtime_log_path}) 2>&1
+echo "[wtec][runtime] start $(date -Is)"
 
 # ── commands ─────────────────────────────────────────────────────────────────
 # IMPORTANT: all parallel execution uses mpirun backend.

@@ -17,10 +17,12 @@ import numpy as np
 from wtec.cluster.mpi import MPIConfig, build_command
 from wtec.cluster.pbs import PBSJobConfig, generate_script
 from wtec.config.cluster import ClusterConfig
+from wtec.config.materials import get_material
 from wtec.topology.arc_scan import compute_arc_connectivity
 from wtec.topology.deviation import build_result
 from wtec.topology.evaluator import evaluate_topology_point
 from wtec.topology.variant_discovery import discover_variants
+from wtec.wannier.convergence import assert_wannier_topology_from_files
 from wtec.wannier.delta_h import apply_delta_h_to_hr_file, load_delta_h_artifact
 from wtec.wannier.model import WannierTBModel
 
@@ -89,8 +91,10 @@ class TopologyPipeline:
             "fermi_ev": None,
             "arc_engine": "siesta_slab_ldos",
             "arc_allow_proxy_fallback": False,
+            "arc_kmesh_xy": [8, 8],
+            "arc_broadening_ev": 0.06,
             "node_method": "wannierberri_flux",
-            "siesta_slab_ldos_autogen": "kwant_proxy",
+            "siesta_slab_ldos_autogen": "tb_kresolved",
             "hr_scope": "per_variant",
             "caveat_reuse_global_hr_dat": False,
             "delta_h_artifact_path": None,
@@ -184,8 +188,8 @@ class TopologyPipeline:
         merged_tiering["screen"] = screen_default
         out["tiering"] = merged_tiering
         out["siesta_slab_ldos_autogen"] = (
-            str(out.get("siesta_slab_ldos_autogen", "kwant_proxy")).strip().lower()
-            or "kwant_proxy"
+            str(out.get("siesta_slab_ldos_autogen", "tb_kresolved")).strip().lower()
+            or "tb_kresolved"
         )
         return out
 
@@ -419,6 +423,10 @@ class TopologyPipeline:
         max_variant_jobs = max(1, int(topo_cfg.get("max_concurrent_variant_dft_jobs", 1)))
         min_th = min(thicknesses) if thicknesses else 1
         reuse_global_hr = bool(topo_cfg.get("caveat_reuse_global_hr_dat", False))
+        try:
+            material_class = str(get_material(str(self.cfg.get("material", ""))).material_class).strip().lower()
+        except Exception:
+            material_class = "generic"
 
         if reuse_global_hr:
             global_hr = str(self.hr_dat_path.resolve())
@@ -476,6 +484,11 @@ class TopologyPipeline:
                     fe = float(parse_fermi_energy(scf_out))
                 except Exception:
                     fe = float(row.get("fermi_ev", 0.0))
+                assert_wannier_topology_from_files(
+                    hr_dat_path=hr_path,
+                    win_path=win_path,
+                    material_class=material_class,
+                )
                 return {
                     "status": "ok",
                     "hr_dat_path": str(hr_path.resolve()),
@@ -489,6 +502,17 @@ class TopologyPipeline:
                 f"{run_name}/{row['point_name']}"
             )
             atoms = read_structure(structure_path)
+            siesta_cfg = self._dft_siesta_cfg() if dft_engine == "siesta" else {}
+            k_scf_default = tuple(self.cfg.get("kpoints_scf", (8, 8, 8)))
+            k_nscf_default = tuple(self.cfg.get("kpoints_nscf", (12, 12, 12)))
+            if dft_engine == "siesta":
+                raw_scf = siesta_cfg.get("variant_kpoints_scf", k_scf_default)
+                raw_nscf = siesta_cfg.get("variant_kpoints_nscf", k_nscf_default)
+                if isinstance(raw_scf, (list, tuple)) and len(raw_scf) == 3:
+                    k_scf_default = tuple(int(v) for v in raw_scf)
+                if isinstance(raw_nscf, (list, tuple)) and len(raw_nscf) == 3:
+                    k_nscf_default = tuple(int(v) for v in raw_nscf)
+
             common_kwargs = {
                 "run_dir": dft_dir,
                 "remote_base": remote_base,
@@ -497,8 +521,8 @@ class TopologyPipeline:
                 "n_cores_by_queue": cluster_cfg.mpi_cores_by_queue,
                 "queue": cluster_cfg.pbs_queue,
                 "queue_priority": cluster_cfg.pbs_queue_priority,
-                "kpoints_scf": tuple(self.cfg.get("kpoints_scf", (8, 8, 8))),
-                "kpoints_nscf": tuple(self.cfg.get("kpoints_nscf", (12, 12, 12))),
+                "kpoints_scf": k_scf_default,
+                "kpoints_nscf": k_nscf_default,
                 "omp_threads": cluster_cfg.omp_threads,
                 "modules": cluster_cfg.modules,
                 "bin_dirs": cluster_cfg.bin_dirs,
@@ -521,7 +545,6 @@ class TopologyPipeline:
                         **common_kwargs,
                     )
                 elif dft_engine == "siesta":
-                    siesta_cfg = self._dft_siesta_cfg()
                     pipeline = PipelineClass(
                         atoms,
                         self.cfg["material"],
@@ -542,10 +565,10 @@ class TopologyPipeline:
                             if isinstance(siesta_cfg.get("factorization_defaults"), dict)
                             else {}
                         ),
-                        dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
-                        dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                        dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.18)),
+                        dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 6)),
                         electronic_temperature_k=float(siesta_cfg.get("electronic_temperature_k", 300.0)),
-                        max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                        max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 120)),
                         dispersion_cfg=self._dft_dispersion_cfg(),
                         **common_kwargs,
                     )
@@ -568,6 +591,11 @@ class TopologyPipeline:
                 fe = float(parse_fermi_energy(scf_out))
                 nscf_meta = pipeline.run_nscf(fe)
                 wan_meta = pipeline.run_wannier(fe)
+                assert_wannier_topology_from_files(
+                    hr_dat_path=hr_path,
+                    win_path=win_path,
+                    material_class=material_class,
+                )
             return {
                 "status": "ok",
                 "hr_dat_path": str(hr_path.resolve()),
@@ -742,7 +770,7 @@ class TopologyPipeline:
             return rows
 
         autogen_mode = str(
-            topo_cfg.get("siesta_slab_ldos_autogen", "kwant_proxy")
+            topo_cfg.get("siesta_slab_ldos_autogen", "tb_kresolved")
         ).strip().lower()
         disabled_modes = {"none", "off", "disabled", "false", "no"}
         energy_shift = float(topo_cfg.get("energy_shift_ev", 0.0))
@@ -778,6 +806,14 @@ class TopologyPipeline:
                 row["status"] = "failed"
                 row["reason"] = f"missing_siesta_slab_ldos_json:{ldos_path}"
                 continue
+            if autogen_mode in {"tb_kresolved", "kresolved", "tb_surface_kresolved"}:
+                arc_prefer_engine = "tb_kresolved"
+                source_kind = "autogenerated_tb_kresolved"
+                allow_proxy = bool(topo_cfg.get("arc_allow_proxy_fallback", False))
+            else:
+                arc_prefer_engine = "kwant"
+                source_kind = "autogenerated_kwant_proxy"
+                allow_proxy = True
 
             hr_raw = row.get("hr_dat_path")
             if not hr_raw:
@@ -814,9 +850,11 @@ class TopologyPipeline:
                     n_layers_x=int(topo_cfg.get("n_layers_x", 4)),
                     n_layers_y=int(topo_cfg.get("n_layers_y", 4)),
                     lead_axis=str(topo_cfg.get("transport_axis_primary", "x")),
-                    prefer_engine="kwant",
+                    prefer_engine=arc_prefer_engine,
                     hr_dat_path=str(hr_path),
-                    allow_proxy_fallback=True,
+                    allow_proxy_fallback=allow_proxy,
+                    kmesh_xy=tuple(int(v) for v in topo_cfg.get("arc_kmesh_xy", [8, 8])),
+                    broadening_ev=float(topo_cfg.get("arc_broadening_ev", 0.06)),
                 )
             except Exception as exc:
                 row["status"] = "failed"
@@ -835,8 +873,8 @@ class TopologyPipeline:
             payload = {
                 "metric": float(np.clip(metric, 0.0, 1.0)),
                 "surface_fraction": float(np.clip(metric, 0.0, 1.0)),
-                "source_engine": str(arc.get("engine", "kwant_ldos_surface_proxy")),
-                "source_kind": "autogenerated_kwant_proxy",
+                "source_engine": str(arc.get("engine", arc_prefer_engine)),
+                "source_kind": source_kind,
                 "generated_by": "wtec.topology_pipeline",
                 "point_name": str(row.get("point_name", "")),
                 "thickness_uc": int(row.get("thickness_uc", 1)),
@@ -958,6 +996,8 @@ class TopologyPipeline:
                     "siesta_slab_ldos_source_engine": row.get("siesta_slab_ldos_source_engine"),
                     "siesta_slab_ldos_source_kind": row.get("siesta_slab_ldos_source_kind"),
                     "arc_allow_proxy_fallback": bool(topo_cfg.get("arc_allow_proxy_fallback", False)),
+                    "arc_kmesh_xy": [int(v) for v in topo_cfg.get("arc_kmesh_xy", [8, 8])],
+                    "arc_broadening_ev": float(topo_cfg.get("arc_broadening_ev", 0.06)),
                     "transport_probe_enabled": bool(
                         (topo_cfg.get("transport_probe", {}) or {}).get("enabled", True)
                     ),
@@ -1989,6 +2029,46 @@ class TopologyPipeline:
                     continue
                 if status in {"pending", "pending_variant"}:
                     row["status"] = "ok"
+
+        try:
+            material_class = str(
+                get_material(str(self.cfg.get("material", ""))).material_class
+            ).strip().lower()
+        except Exception:
+            material_class = "generic"
+        if material_class == "weyl":
+            check_cache: dict[tuple[str, str], str | None] = {}
+            for row in point_rows:
+                if str(row.get("status", "")).lower() == "failed":
+                    continue
+                hr_raw = row.get("hr_dat_path")
+                if not hr_raw:
+                    row["status"] = "failed"
+                    row["reason"] = "missing_hr_dat_path_for_topology_gate"
+                    continue
+                hr = Path(str(hr_raw)).expanduser().resolve()
+                wp_raw = row.get("win_path")
+                wp = (
+                    Path(str(wp_raw)).expanduser().resolve()
+                    if wp_raw
+                    else hr.with_name(f"{self.cfg.get('material', 'material')}.win")
+                )
+                key = (str(hr), str(wp))
+                if key not in check_cache:
+                    gate_reason: str | None = None
+                    try:
+                        assert_wannier_topology_from_files(
+                            hr_dat_path=hr,
+                            win_path=wp if wp.exists() else None,
+                            material_class=material_class,
+                        )
+                    except Exception as exc:
+                        gate_reason = f"wannier_topology_gate_failed:{type(exc).__name__}:{exc}"
+                    check_cache[key] = gate_reason
+                cached_reason = check_cache.get(key)
+                if cached_reason:
+                    row["status"] = "failed"
+                    row["reason"] = cached_reason
 
         point_rows = self._materialize_siesta_slab_ldos_rows(
             rows=point_rows,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import posixpath
 import re
 import shlex
 from pathlib import Path
@@ -14,7 +15,10 @@ from wtec.cluster.mpi import MPIConfig, build_command
 from wtec.qe.inputs import QEInputGenerator
 from wtec.qe.pw2wan import generate as pw2wan_generate
 from wtec.wannier.inputs import generate_win
-from wtec.wannier.convergence import assert_wannier_converged
+from wtec.wannier.convergence import (
+    assert_wannier_converged,
+    assert_wannier_topology_from_files,
+)
 
 
 class DFTPipeline:
@@ -224,15 +228,16 @@ class DFTPipeline:
             if dis_froz_win_override is not None
             else self.preset.dis_froz_win
         )
+        current_dis_win = dis_win
+        # Generate initial .win before preflight file checks.
         generate_win(
             self.atoms,
             self.material,
             num_bands=nbnd,
             fermi_energy=fermi_energy,
             kpoints=self.kpoints_nscf,
-            dis_win=dis_win,
+            dis_win=current_dis_win,
             dis_froz_win=dis_froz_win,
-            # Keep Wannier spinor mode consistent with QE noncollinear/SOC mode.
             spinors=self.qe_noncolin,
             outfile=win_file,
         )
@@ -260,34 +265,97 @@ class DFTPipeline:
             modules=self.modules,
             env_vars=self._runtime_env_vars(),
         )
-        return self.jm.submit_and_wait(
-            script,
-            remote_dir=remote_dir,
-            local_dir=self.run_dir,
-            retrieve_patterns=[
-                f"{self.material}_hr.dat",
-                f"{self.material}.wout",
-                f"w90_{self.material}.log",
-                f"{self.material}.pw2wan.out",
-            ],
-            script_name=f"wan_{self.material}.pbs",
-            stage_files=[pw2wan_in, win_file],
-            expected_local_outputs=[f"{self.material}_hr.dat", f"{self.material}.wout"],
-            queue_used=queue_used,
-            poll_interval=self.log_poll_interval,
-            live_log=self.live_log,
-            live_files=[
-                f"{self.material}.pw2wan.out",
-                f"{self.material}.wout",
-                f"w90_{self.material}.log",
-            ],
-            stale_log_seconds=self.stale_log_seconds,
-        )
+
+        attempts = 0
+        max_attempts = 2
+        while True:
+            attempts += 1
+            generate_win(
+                self.atoms,
+                self.material,
+                num_bands=nbnd,
+                fermi_energy=fermi_energy,
+                kpoints=self.kpoints_nscf,
+                dis_win=current_dis_win,
+                dis_froz_win=dis_froz_win,
+                # Keep Wannier spinor mode consistent with QE noncollinear/SOC mode.
+                spinors=self.qe_noncolin,
+                outfile=win_file,
+            )
+            try:
+                meta = self.jm.submit_and_wait(
+                    script,
+                    remote_dir=remote_dir,
+                    local_dir=self.run_dir,
+                    retrieve_patterns=[
+                        f"{self.material}_hr.dat",
+                        f"{self.material}.wout",
+                        f"w90_{self.material}.log",
+                        f"{self.material}.pw2wan.out",
+                    ],
+                    script_name=f"wan_{self.material}.pbs",
+                    stage_files=[pw2wan_in, win_file],
+                    expected_local_outputs=[f"{self.material}_hr.dat", f"{self.material}.wout"],
+                    queue_used=queue_used,
+                    poll_interval=self.log_poll_interval,
+                    live_log=self.live_log,
+                    live_files=[
+                        f"{self.material}.pw2wan.out",
+                        f"{self.material}.wout",
+                        f"w90_{self.material}.log",
+                    ],
+                    stale_log_seconds=self.stale_log_seconds,
+                )
+                break
+            except RuntimeError as exc:
+                if attempts >= max_attempts:
+                    raise
+                if not self._is_wannier_dis_window_failure(remote_dir):
+                    raise
+                low, high = float(current_dis_win[0]), float(current_dis_win[1])
+                widened = (min(low, -20.0), max(high, 20.0))
+                if widened == current_dis_win:
+                    raise
+                print(
+                    "[DFTPipeline] Wannier dis_win too narrow for some k-points; "
+                    f"retrying with dis_win={widened} (previous={current_dis_win})."
+                )
+                current_dis_win = widened
+                continue
+
         assert_wannier_converged(
             wout_path=self.run_dir / f"{self.material}.wout",
             win_path=win_file,
         )
+        assert_wannier_topology_from_files(
+            hr_dat_path=self.run_dir / f"{self.material}_hr.dat",
+            win_path=win_file,
+            material_class=getattr(self.preset, "material_class", "generic"),
+        )
         return meta
+
+    def _is_wannier_dis_window_failure(self, remote_dir: str) -> bool:
+        """Detect dis_windows under-population failure in remote wannier logs."""
+        needle = "dis_windows: Energy window contains fewer states than number of target WFs"
+        wout = posixpath.join(remote_dir, f"{self.material}.wout")
+        cmd = (
+            "bash -lc "
+            + shlex.quote(
+                "for f in "
+                + shlex.quote(wout)
+                + " "
+                + shlex.quote(posixpath.join(remote_dir, f"{self.material}.node_*.werr"))
+                + "; do "
+                "if [ -f \"$f\" ] && grep -Fq "
+                + shlex.quote(needle)
+                + " \"$f\"; then echo yes; exit 0; fi; "
+                "done; echo no"
+            )
+        )
+        rc, stdout, _ = self.jm._ssh.run(cmd, check=False)
+        if rc != 0:
+            return False
+        return stdout.strip().splitlines()[-1:].pop() == "yes"
 
     def run_full(self) -> Path:
         """Run full SCF → NSCF → Wannier90 pipeline.

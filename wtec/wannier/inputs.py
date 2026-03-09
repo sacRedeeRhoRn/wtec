@@ -30,7 +30,11 @@ def generate_win(
     kpoints: tuple[int, int, int] = (8, 8, 8),
     dis_win: tuple[float, float] = (-10.0, 15.0),
     dis_froz_win: tuple[float, float] = (-3.0, 3.0),
+    dis_num_iter: int = 1000,
+    num_iter: int = 1000,
     spinors: bool = True,
+    search_shells: int = 300,
+    kmesh_tol: float = 1.0e-2,
     custom_projections: list[str] | None = None,
     outfile: str | Path | None = None,
 ) -> str:
@@ -66,7 +70,12 @@ def generate_win(
 
     # ── kpoints block ────────────────────────────────────────────────────────
     kx, ky, kz = kpoints
-    kpts_block = f"mp_grid : {kx} {ky} {kz}\n\nbegin kpoints"
+    kpts_block = (
+        f"mp_grid : {kx} {ky} {kz}\n"
+        f"search_shells = {int(search_shells)}\n"
+        f"kmesh_tol = {float(kmesh_tol):.6g}\n\n"
+        "begin kpoints"
+    )
     xs = _qe_folded_mp_axis(kx)
     ys = _qe_folded_mp_axis(ky)
     zs = _qe_folded_mp_axis(kz)
@@ -87,7 +96,8 @@ dis_win_min  = {fermi_energy + dis_win[0]:.4f}
 dis_froz_max = {fermi_energy + dis_froz_win[1]:.4f}
 dis_froz_min = {fermi_energy + dis_froz_win[0]:.4f}
 
-num_iter      = 500
+dis_num_iter  = {int(dis_num_iter)}
+num_iter      = {int(num_iter)}
 num_print_cycles = 50
 write_hr = .true.
 

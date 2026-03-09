@@ -156,18 +156,37 @@ class WannierTBModel:
                 "pip install -e /path/to/kwant"
             )
 
+        if n_layers_x <= 0 or n_layers_y <= 0 or n_layers_z <= 0:
+            raise ValueError("n_layers_x, n_layers_y and n_layers_z must be > 0")
         if n_layers_x < 2:
             raise ValueError(
-                f"n_layers_x={n_layers_x} is invalid: Kwant leads require >= 2 unit cells "
-                "along the lead axis to avoid degenerate overlap."
+                f"n_layers_x={n_layers_x} is too small for Kwant lead attachment. "
+                "The scattering region must span at least 2 unit cells along the lead "
+                "axis so that it interrupts both semi-infinite leads. "
+                "With n_layers_x=1 Kwant raises 'does not interrupt the lead' and "
+                "conductance returns 0 silently. "
+                "Set transport_n_layers_x >= 4 in your config (minimum valid: 2)."
             )
-        if n_layers_y <= 0 or n_layers_z <= 0:
-            raise ValueError("n_layers_y and n_layers_z must be > 0")
         axis_map = {"x": 0, "y": 1, "z": 2}
         axis_key = lead_axis.lower().strip()
         if axis_key not in axis_map:
             raise ValueError(f"lead_axis must be one of ['x', 'y', 'z'], got {lead_axis!r}")
         lead_axis_idx = axis_map[axis_key]
+
+        shape = (int(n_layers_x), int(n_layers_y), int(n_layers_z))
+        required_axis_cells = self.required_lead_axis_cells(
+            lead_axis=axis_key,
+            n_layers_x=shape[0],
+            n_layers_y=shape[1],
+            n_layers_z=shape[2],
+        )
+        if shape[lead_axis_idx] < required_axis_cells:
+            axis_name = ("x", "y", "z")[lead_axis_idx]
+            raise ValueError(
+                f"{axis_name}-axis cells={shape[lead_axis_idx]} is too small for this "
+                f"Wannier Hamiltonian (required >= {required_axis_cells} for lead_axis={axis_key}). "
+                "Increase transport length along the lead axis."
+            )
 
         nw = self._num_orbs
 
@@ -181,7 +200,6 @@ class WannierTBModel:
 
         # ── Film sites ─────────────────────────────────────────────────────
         h0 = np.array(self._model.hamilton([0, 0, 0], convention=2), dtype=complex)
-        shape = (int(n_layers_x), int(n_layers_y), int(n_layers_z))
         for ix in range(n_layers_x):
             for iy in range(n_layers_y):
                 for iz in range(n_layers_z):
@@ -206,6 +224,41 @@ class WannierTBModel:
         sys.attach_lead(right_lead)
 
         return sys
+
+    def required_lead_axis_cells(
+        self,
+        *,
+        lead_axis: str,
+        n_layers_x: int,
+        n_layers_y: int,
+        n_layers_z: int,
+    ) -> int:
+        """Return minimal finite-cell count along lead axis for stable lead attachment.
+
+        Requirement is inferred from real-space hopping range that remains active
+        within the provided finite cross-section.
+        """
+        axis_map = {"x": 0, "y": 1, "z": 2}
+        axis_key = str(lead_axis).lower().strip()
+        if axis_key not in axis_map:
+            raise ValueError(f"lead_axis must be one of ['x', 'y', 'z'], got {lead_axis!r}")
+
+        shape = [int(n_layers_x), int(n_layers_y), int(n_layers_z)]
+        if any(v <= 0 for v in shape):
+            raise ValueError("n_layers_x, n_layers_y and n_layers_z must be > 0")
+
+        lead_axis_idx = axis_map[axis_key]
+        finite_axes = [ax for ax in (0, 1, 2) if ax != lead_axis_idx]
+
+        max_abs_span = 0
+        for rx, ry, rz, _ in self._iter_hoppings():
+            dR = (int(rx), int(ry), int(rz))
+            # Keep only hoppings that can exist within this finite cross-section.
+            if any(abs(dR[ax]) > (shape[ax] - 1) for ax in finite_axes):
+                continue
+            max_abs_span = max(max_abs_span, abs(dR[lead_axis_idx]))
+
+        return max(2, int(max_abs_span))
 
     def _iter_hoppings(self):
         """Yield (rx, ry, rz, matrix) hoppings for full 3D slab construction."""

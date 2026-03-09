@@ -343,3 +343,108 @@ def scan_weyl_nodes(
         out = comm.bcast(out, root=0)
     assert out is not None
     return out
+
+
+def compute_chern_profile(
+    tb_model,
+    *,
+    n_kz: int = 20,
+    n_kxy: int = 20,
+    band_idx: int | None = None,
+) -> dict[str, Any]:
+    """Compute the Chern number C(k_z) profile by sweeping k_z slices.
+
+    Physics basis
+    -------------
+    For a Weyl semimetal, the Chern number integrated over a 2D k_z slice:
+
+        C(k_z) = (1/2π) ∫∫ Ω(k_x, k_y, k_z) dk_x dk_y
+
+    changes by ±1 each time k_z passes through a Weyl node projection.
+    This creates a "topological staircase" C(k_z) that:
+    - Unambiguously locates Weyl node k_z positions without high-symmetry search
+    - Validates the Wannier manifold (wrong Wannierization → C(k_z) = 0 everywhere)
+    - Maps χ = +1 (C increases) and χ = -1 (C decreases) nodes as k_z increases
+
+    For TaP: W1 nodes at k_z ≈ 0.42 (2π/c) and W2 at k_z ≈ 0.58 (2π/c).
+    A valid Wannier model gives |C(k_z=0.5)| = 1 and C(k_z≈0) = 0.
+
+    Parameters
+    ----------
+    tb_model : WannierTBModel
+        Tight-binding model.
+    n_kz : int
+        Number of k_z slices (uniform in [0, 1)).
+    n_kxy : int
+        Number of k_x, k_y grid points per slice for Berry flux integration.
+    band_idx : int or None
+        Index of the lower band of the gap to compute Berry flux for.
+        None = auto (uses the midgap band at each k_z slice).
+
+    Returns
+    -------
+    dict with keys:
+        kz_frac : list[float]
+            k_z values in fractional coordinates [0, 1).
+        chern : list[float]
+            C(k_z) values (integer-valued for well-converged grids).
+        jump_kz : list[float]
+            k_z positions where |dC/dk_z| > 0.5 (Weyl node projections).
+        jump_chirality : list[int]
+            Chirality (+1 or -1) at each jump.
+        topological_sanity : bool
+            True when max(|C|) >= 1 — Wannier model captured topological manifold.
+        n_kz : int
+        n_kxy : int
+        status : str
+    """
+    nkz = max(4, int(n_kz))
+    nkxy = max(4, int(n_kxy))
+
+    kz_vals = np.linspace(0.0, 1.0, nkz, endpoint=False)
+    chern_vals: list[float] = []
+
+    dk = 1.0 / nkxy
+    dk_vec1 = np.array([dk, 0.0, 0.0], dtype=float)
+    dk_vec2 = np.array([0.0, dk, 0.0], dtype=float)
+
+    for kz in kz_vals:
+        # Compute total Berry flux over the k_x-k_y plaquette grid at fixed k_z.
+        total_flux = 0.0
+        for ix in range(nkxy):
+            for iy in range(nkxy):
+                kxy = np.array([ix * dk, iy * dk, kz], dtype=float)
+                # Auto-select band: minimum gap at this k-point
+                if band_idx is None:
+                    evals = np.linalg.eigvalsh(tb_model.hamiltonian_at_k(kxy))
+                    gaps = np.diff(evals)
+                    bi = int(np.argmin(gaps))
+                else:
+                    bi = int(band_idx)
+                total_flux += _berry_plaquette_phase(tb_model, kxy, dk_vec1, dk_vec2, bi)
+        chern_vals.append(float(total_flux / (2.0 * np.pi)))
+
+    chern_arr = np.array(chern_vals, dtype=float)
+
+    # Locate Weyl node k_z projections: jumps in C(k_z)
+    jump_kz: list[float] = []
+    jump_chirality: list[int] = []
+    dC = np.diff(chern_arr)
+    for i, dc in enumerate(dC):
+        if abs(dc) > 0.5:
+            jump_kz.append(float(0.5 * (kz_vals[i] + kz_vals[i + 1])))
+            jump_chirality.append(int(np.sign(dc)))
+
+    max_chern = float(np.max(np.abs(chern_arr)))
+    topological = max_chern >= 0.5
+
+    return {
+        "kz_frac": kz_vals.tolist(),
+        "chern": chern_arr.tolist(),
+        "jump_kz": jump_kz,
+        "jump_chirality": jump_chirality,
+        "topological_sanity": topological,
+        "n_kz": nkz,
+        "n_kxy": nkxy,
+        "status": "ok" if topological else "trivial_or_unconverged",
+    }

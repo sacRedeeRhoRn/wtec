@@ -431,6 +431,7 @@ class JobManager:
         live_remote_dir: str | None = None,
         live_files: list[str] | None = None,
         stale_log_seconds: int = 300,
+        stream_from_start: bool = False,
     ) -> dict:
         """Block until job reaches a terminal state.
 
@@ -469,7 +470,11 @@ class JobManager:
             had_growth = False
             if live_log and log_paths:
                 for remote_path in log_paths:
-                    grew, off = self._stream_file_delta(remote_path, log_offsets.get(remote_path))
+                    grew, off = self._stream_file_delta(
+                        remote_path,
+                        log_offsets.get(remote_path),
+                        stream_from_start=stream_from_start,
+                    )
                     log_offsets[remote_path] = off
                     had_growth = had_growth or grew
             if had_growth:
@@ -532,6 +537,8 @@ class JobManager:
         live_log: bool = False,
         live_files: list[str] | None = None,
         stale_log_seconds: int = 300,
+        retrieve_on_failure: bool = False,
+        stream_from_start: bool = False,
     ) -> dict:
         """Submit job, wait for completion, retrieve files.
 
@@ -557,20 +564,19 @@ class JobManager:
             live_remote_dir=remote_dir,
             live_files=live_files,
             stale_log_seconds=stale_log_seconds,
+            stream_from_start=stream_from_start,
         )
         final_status = final_details["status"]
 
-        if final_status in ("FAILED", "UNKNOWN"):
-            raise RuntimeError(
-                "Job "
-                f"{job_id} ended with status={final_status} "
-                f"(scheduler_state={final_details.get('scheduler_state')}, "
-                f"exit_code={final_details.get('exit_code')}, source={final_details.get('source')}). "
-                f"Check {remote_dir} for logs and outputs."
-            )
+        should_retrieve = final_status not in ("FAILED", "UNKNOWN") or bool(retrieve_on_failure)
+        retrieve_error: str | None = None
+        if should_retrieve:
+            try:
+                self.retrieve(remote_dir, local_dir, retrieve_patterns)
+            except Exception as exc:
+                retrieve_error = f"{type(exc).__name__}: {exc}"
 
-        self.retrieve(remote_dir, local_dir, retrieve_patterns)
-        if expected_local_outputs:
+        if expected_local_outputs and final_status not in ("FAILED", "UNKNOWN"):
             missing_or_empty: list[str] = []
             local_dir_path = Path(local_dir)
             for expected in expected_local_outputs:
@@ -586,7 +592,25 @@ class JobManager:
                 )
 
         if verbose:
-            print(f"  Retrieved files to {local_dir}")
+            if should_retrieve and retrieve_error is None:
+                print(f"  Retrieved files to {local_dir}")
+            elif should_retrieve and retrieve_error is not None:
+                print(f"  WARNING: retrieval failed for {local_dir}: {retrieve_error}")
+
+        if final_status in ("FAILED", "UNKNOWN"):
+            retrieve_note = ""
+            if should_retrieve:
+                if retrieve_error is None:
+                    retrieve_note = " Retrieved requested artifacts locally."
+                else:
+                    retrieve_note = f" Artifact retrieval failed: {retrieve_error}."
+            raise RuntimeError(
+                "Job "
+                f"{job_id} ended with status={final_status} "
+                f"(scheduler_state={final_details.get('scheduler_state')}, "
+                f"exit_code={final_details.get('exit_code')}, source={final_details.get('source')}). "
+                f"Check {remote_dir} for logs and outputs.{retrieve_note}"
+            )
 
         return {
             "job_id": job_id,
@@ -634,6 +658,8 @@ class JobManager:
         self,
         remote_path: str,
         current_offset: int | None,
+        *,
+        stream_from_start: bool = False,
     ) -> tuple[bool, int | None]:
         """Stream newly appended bytes from remote file.
 
@@ -645,9 +671,19 @@ class JobManager:
         if size is None:
             return (False, current_offset)
 
-        # First observation starts at current end to avoid replaying old logs.
+        # First observation either starts at file end (default) or from byte 1.
         if current_offset is None:
-            return (False, size)
+            if not stream_from_start:
+                return (False, size)
+            offset = 0
+            if size == 0:
+                return (False, offset)
+            delta0 = self._remote_read_from(remote_path, 1)
+            if delta0:
+                tag = posixpath.basename(remote_path)
+                for line in delta0.splitlines():
+                    print(f"  [{tag}] {line}")
+            return (bool(delta0), size)
 
         offset = current_offset
         if size < offset:

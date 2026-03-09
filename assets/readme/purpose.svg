@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-label="wtec purpose: topological semimetal arc transport">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f0c29"/>
+      <stop offset="50%" stop-color="#1a0a3d"/>
+      <stop offset="100%" stop-color="#24243e"/>
+    </linearGradient>
+    <linearGradient id="arcTop" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#a8edea" stop-opacity="0.0"/>
+      <stop offset="20%" stop-color="#a8edea" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#fed6e3" stop-opacity="1.0"/>
+      <stop offset="80%" stop-color="#a8edea" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#a8edea" stop-opacity="0.0"/>
+    </linearGradient>
+    <linearGradient id="arcBot" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#f093fb" stop-opacity="0.0"/>
+      <stop offset="20%" stop-color="#f093fb" stop-opacity="0.9"/>
+      <stop offset="50%" stop-color="#f5576c" stop-opacity="1.0"/>
+      <stop offset="80%" stop-color="#f093fb" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#f093fb" stop-opacity="0.0"/>
+    </linearGradient>
+    <linearGradient id="slabFill" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1e1060"/>
+      <stop offset="100%" stop-color="#0d0829"/>
+    </linearGradient>
+    <linearGradient id="slabFill2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a1a70"/>
+      <stop offset="100%" stop-color="#100d35"/>
+    </linearGradient>
+    <linearGradient id="rhoArr" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#a8edea"/>
+      <stop offset="100%" stop-color="#fed6e3"/>
+    </linearGradient>
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="softglow">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1200" height="340" fill="url(#bg)"/>
+
+  <!-- ── Film slab (isometric parallelogram) ─── -->
+  <!-- Thick slab (left) -->
+  <g transform="translate(120,40)">
+    <!-- side face -->
+    <polygon points="0,260 0,80 40,50 40,230" fill="#130e50" stroke="#2a1a70" stroke-width="1"/>
+    <!-- top face -->
+    <polygon points="0,80 280,80 320,50 40,50" fill="#1e1060" stroke="#3a2a80" stroke-width="1"/>
+    <!-- front face -->
+    <polygon points="0,80 280,80 280,260 0,260" fill="url(#slabFill)" stroke="#2a1a70" stroke-width="1"/>
+    <!-- Weyl nodes inside (± pairs) -->
+    <circle cx="100" cy="165" r="7" fill="#f5576c" opacity="0.85" filter="url(#glow)"/>
+    <circle cx="152" cy="165" r="7" fill="#4facfe" opacity="0.85" filter="url(#glow)"/>
+    <circle cx="220" cy="165" r="7" fill="#f5576c" opacity="0.85" filter="url(#glow)"/>
+    <circle cx="175" cy="145" r="5" fill="#4facfe" opacity="0.7" filter="url(#glow)"/>
+    <text x="100" y="161" font-size="9" fill="white" text-anchor="middle" font-family="monospace">+</text>
+    <text x="152" y="161" font-size="9" fill="white" text-anchor="middle" font-family="monospace">−</text>
+    <text x="220" y="161" font-size="9" fill="white" text-anchor="middle" font-family="monospace">+</text>
+    <!-- top arc surface state -->
+    <path d="M 20,80 C 80,60 200,60 260,80" fill="none" stroke="url(#arcTop)" stroke-width="4" filter="url(#glow)"/>
+    <!-- bottom arc surface state -->
+    <path d="M 20,260 C 80,278 200,278 260,260" fill="none" stroke="url(#arcBot)" stroke-width="4" filter="url(#glow)"/>
+    <!-- d arrow -->
+    <line x1="295" y1="80" x2="295" y2="260" stroke="#8888aa" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <polygon points="295,80 291,93 299,93" fill="#8888aa"/>
+    <polygon points="295,260 291,247 299,247" fill="#8888aa"/>
+    <text x="310" y="178" font-size="13" fill="#aaaacc" font-family="monospace" font-style="italic">d</text>
+  </g>
+
+  <!-- Thin slab (right) -->
+  <g transform="translate(560,100)">
+    <!-- side face -->
+    <polygon points="0,190 0,90 40,60 40,220" fill="#130e50" stroke="#2a1a70" stroke-width="1"/>
+    <!-- top face -->
+    <polygon points="0,90 280,90 320,60 40,60" fill="#1e1060" stroke="#3a2a80" stroke-width="1"/>
+    <!-- front face -->
+    <polygon points="0,90 280,90 280,190 0,190" fill="url(#slabFill2)" stroke="#2a1a70" stroke-width="1"/>
+    <!-- Weyl nodes (compressed, hybridizing) -->
+    <circle cx="110" cy="137" r="7" fill="#f5576c" opacity="0.7" filter="url(#glow)"/>
+    <circle cx="170" cy="137" r="7" fill="#4facfe" opacity="0.7" filter="url(#glow)"/>
+    <!-- hybridization link -->
+    <line x1="117" y1="137" x2="163" y2="137" stroke="#ffffff" stroke-width="1" stroke-dasharray="3,2" opacity="0.5"/>
+    <!-- top arc state (brighter — arc-dominated) -->
+    <path d="M 20,90 C 80,65 200,65 260,90" fill="none" stroke="url(#arcTop)" stroke-width="6" filter="url(#softglow)" opacity="0.95"/>
+    <!-- bottom arc state -->
+    <path d="M 20,190 C 80,213 200,213 260,190" fill="none" stroke="url(#arcBot)" stroke-width="6" filter="url(#softglow)" opacity="0.95"/>
+    <!-- d arrow -->
+    <line x1="295" y1="90" x2="295" y2="190" stroke="#8888aa" stroke-width="1.5" stroke-dasharray="4,3"/>
+    <polygon points="295,90 291,103 299,103" fill="#8888aa"/>
+    <polygon points="295,190 291,177 299,177" fill="#8888aa"/>
+    <text x="310" y="147" font-size="13" fill="#aaaacc" font-family="monospace" font-style="italic">d'</text>
+  </g>
+
+  <!-- ── ρ(d) schematic curve (right panel) ─── -->
+  <g transform="translate(910,50)">
+    <!-- axes -->
+    <line x1="40" y1="260" x2="240" y2="260" stroke="#555577" stroke-width="1.5"/>
+    <line x1="40" y1="260" x2="40" y2="30" stroke="#555577" stroke-width="1.5"/>
+    <polygon points="240,260 228,255 228,265" fill="#555577"/>
+    <polygon points="40,30 35,42 45,42" fill="#555577"/>
+    <text x="248" y="264" font-size="12" fill="#8888aa" font-family="monospace" font-style="italic">d</text>
+    <text x="28" y="28" font-size="12" fill="#8888aa" font-family="monospace" font-style="italic">ρ</text>
+    <!-- FS reference: increasing -->
+    <path d="M 55,220 C 100,200 160,145 230,100" fill="none" stroke="#cccccc" stroke-width="2" stroke-dasharray="6,4" opacity="0.7"/>
+    <!-- pristine topological: decreasing -->
+    <path d="M 55,115 C 100,128 160,175 230,220" fill="none" stroke="#a8edea" stroke-width="3" filter="url(#glow)"/>
+    <!-- defect: intermediate -->
+    <path d="M 55,130 C 100,148 160,190 230,225" fill="none" stroke="#f093fb" stroke-width="2" opacity="0.85"/>
+    <!-- legend dots only -->
+    <circle cx="60" cy="115" r="4" fill="#a8edea" filter="url(#glow)"/>
+    <circle cx="60" cy="130" r="3" fill="#f093fb"/>
+    <circle cx="60" cy="145" r="3" fill="#cccccc" opacity="0.7"/>
+  </g>
+
+  <!-- ── Connecting arrow from slab → ρ plot ─── -->
+  <path d="M 898,170 C 910,170 908,170 908,170" fill="none" stroke="#444466" stroke-width="1"/>
+
+  <!-- Small axis labels -->
+  <text x="118" y="32" font-size="11" fill="#6688aa" font-family="monospace">d &gt; d'</text>
+  <text x="565" y="95" font-size="11" fill="#6688aa" font-family="monospace">d'</text>
+  <text x="913" y="44" font-size="11" fill="#6688aa" font-family="monospace">ρ(d)</text>
+</svg>

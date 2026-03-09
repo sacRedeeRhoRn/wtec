@@ -9,7 +9,10 @@ from wtec.abacus.inputs import AbacusInputGenerator
 from wtec.cluster.mpi import MPIConfig, build_command
 from wtec.cluster.pbs import PBSJobConfig, generate_script
 from wtec.config.materials import get_material
-from wtec.wannier.convergence import assert_wannier_converged
+from wtec.wannier.convergence import (
+    assert_wannier_converged,
+    assert_wannier_topology_from_files,
+)
 from wtec.wannier.inputs import generate_win
 
 
@@ -247,6 +250,11 @@ class AbacusPipeline:
         assert_wannier_converged(
             wout_path=self.run_dir / f"{self.material}.wout",
             win_path=win,
+        )
+        assert_wannier_topology_from_files(
+            hr_dat_path=self.run_dir / f"{self.material}_hr.dat",
+            win_path=win,
+            material_class=getattr(self.preset, "material_class", "generic"),
         )
         return meta
 

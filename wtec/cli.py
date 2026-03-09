@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -47,6 +48,10 @@ EXTRA_DEPS = {
 # Local kwant source (sibling directory of this package's project root)
 _THIS_DIR = Path(__file__).resolve().parent.parent   # .../wtec/
 _DEFAULT_KWANT_SRC = _THIS_DIR.parent / "kwant"
+_DEFAULT_FORCE_STRESS_REFERENCE_OUTCAR = (
+    "/home/msj/Desktop/playground/ni-si-dev/actual_potential_run/"
+    "cpu_work/vasp_runs/iter_000/frame_002/OUTCAR"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1184,6 +1189,9 @@ def _migrate_project_template(path: Path) -> bool:
     updated = updated.replace("max_strain_percent = 35.0", "max_strain_percent = 6.0")
     updated = updated.replace("max_strain_percent = 5.0", "max_strain_percent = 6.0")
     updated = updated.replace("max_search_supercell = 4", "max_search_supercell = 8")
+    updated = updated.replace("dm_mixing_weight = 0.10", "dm_mixing_weight = 0.18")
+    updated = updated.replace("dm_number_pulay = 8", "dm_number_pulay = 6")
+    updated = updated.replace("max_scf_iterations = 200", "max_scf_iterations = 120")
     if "failure_policy =" not in updated:
         updated = updated.replace(
             "strict_qsub = true",
@@ -1228,6 +1236,8 @@ def _migrate_project_template(path: Path) -> bool:
             "family = \"pes\"\n"
             "engine = \"qe\"\n"
             "structure_file = \"references/TaP_primitive.cif\"\n"
+            "# mp_id = \"mp-1067587\"\n"
+            "use_primitive = true\n"
             "disable_symmetry = true\n"
             "reuse_policy = \"strict_hash\"\n\n"
             "[dft.tracks.lcao_upscaled]\n"
@@ -1282,6 +1292,10 @@ def _migrate_project_template(path: Path) -> bool:
                 block_end = len(updated)
             block = updated[block_start:block_end]
             additions: list[str] = []
+            if "variant_kpoints_scf =" not in block:
+                additions.append("variant_kpoints_scf = [4, 4, 4]")
+            if "variant_kpoints_nscf =" not in block:
+                additions.append("variant_kpoints_nscf = [6, 6, 6]")
             if "mpi_np_scf =" not in block:
                 additions.append("mpi_np_scf = 0")
             if "mpi_np_nscf =" not in block:
@@ -1297,13 +1311,13 @@ def _migrate_project_template(path: Path) -> bool:
             if "factorization_defaults =" not in block:
                 additions.append("factorization_defaults = {}")
             if "dm_mixing_weight =" not in block:
-                additions.append("dm_mixing_weight = 0.10")
+                additions.append("dm_mixing_weight = 0.18")
             if "dm_number_pulay =" not in block:
-                additions.append("dm_number_pulay = 8")
+                additions.append("dm_number_pulay = 6")
             if "electronic_temperature_k =" not in block:
                 additions.append("electronic_temperature_k = 300.0")
             if "max_scf_iterations =" not in block:
-                additions.append("max_scf_iterations = 200")
+                additions.append("max_scf_iterations = 120")
             if additions:
                 block_text = block
                 if block_text and not block_text.endswith("\n"):
@@ -1325,29 +1339,13 @@ def _migrate_project_template(path: Path) -> bool:
         )
     if "[transport]\n" in updated and "policy =" not in updated.split("[transport]\n", 1)[1].split("\n\n", 1)[0]:
         updated = updated.replace("[transport]\n", "[transport]\npolicy = \"single_track\"\n", 1)
-    if "[transport.autotune]" not in updated:
-        updated = updated.replace(
-            "[topology]",
-            "[transport.autotune]\n"
-            "enabled = true\n"
-            "scope = \"per_queue\"\n"
-            "cache_file = \"~/.wtec/transport_autotune.json\"\n"
-            "benchmark_walltime = \"00:08:00\"\n"
-            "benchmark_n_ensemble = 1\n"
-            "[[transport.autotune.profiles]]\n"
-            "mpi_np = 1\n"
-            "threads = \"all\"\n"
-            "[[transport.autotune.profiles]]\n"
-            "mpi_np = 2\n"
-            "threads = \"half\"\n"
-            "[[transport.autotune.profiles]]\n"
-            "mpi_np = 4\n"
-            "threads = \"quarter\"\n\n"
-            "[topology]",
-            1,
-        )
     if "[topology]\n" in updated and "variant_dft_engine =" not in updated.split("[topology]\n", 1)[1].split("\n\n", 1)[0]:
         updated = updated.replace("hr_scope = \"per_variant\"", "hr_scope = \"per_variant\"\nvariant_dft_engine = \"siesta\"")
+    # Arc geometry defaults: patch insufficient n_layers_y for arc resolution
+    if "[topology]\n" in updated and "n_layers_y =" not in updated.split("[topology]\n", 1)[1].split("\n\n", 1)[0]:
+        updated = updated.replace("variant_dft_engine = \"siesta\"", "variant_dft_engine = \"siesta\"\nn_layers_x = 4\nn_layers_y = 16")
+    # Thickness sweep: extend to cover arc-hybridized → separated → bulk regimes
+    updated = updated.replace("thicknesses = [3, 5, 7, 9, 11]", "thicknesses = [2, 4, 6, 8, 10, 12, 16, 20, 25]")
     if "[topology.hr_grid]" not in updated:
         updated = updated.rstrip() + (
             "\n\n[topology.hr_grid]\n"
@@ -1657,8 +1655,12 @@ qe_lspinorb = true
 # Small-structure PES reference (required in dual_family).
 family = "pes"
 engine = "qe" # qe|vasp
-# REQUIRED for dual_family: explicit small primitive/conventional reference CIF.
+# REQUIRED for dual_family/hybrid: provide either:
+# 1) explicit local CIF path, or
+# 2) MP ID for auto-generation into ./references/ at runtime preflight.
 structure_file = "references/TaP_primitive.cif"
+# mp_id = "mp-1067587"
+use_primitive = true
 disable_symmetry = true
 reuse_policy = "strict_hash" # strict_hash|timestamp_only
 
@@ -1690,6 +1692,9 @@ wannier_interface = "sisl" # sisl|builtin
 pseudo_dir = ""
 # Optional basis profile in wtec.siesta.presets (auto from material if empty).
 basis_profile = ""
+# LCAO variant-track k-mesh (used for defect/slab upscaled runs; keeps cost bounded).
+variant_kpoints_scf = [4, 4, 4]
+variant_kpoints_nscf = [6, 6, 6]
 # Stage-level MPI/OMP settings (0 = auto by queue/core allocation).
 mpi_np_scf = 0
 mpi_np_nscf = 0
@@ -1701,10 +1706,10 @@ omp_threads_wannier = 0
 # Example: factorization_defaults = { "g3_32" = { mpi_np_scf = 16, omp_threads_scf = 2, mpi_np_nscf = 32, omp_threads_nscf = 1 } }
 factorization_defaults = {}
 # SCF convergence tuning for LCAO acceleration.
-dm_mixing_weight = 0.10
-dm_number_pulay = 8
+dm_mixing_weight = 0.18
+dm_number_pulay = 6
 electronic_temperature_k = 300.0
-max_scf_iterations = 200
+max_scf_iterations = 120
 
 [dft.vasp]
 # Optional override; falls back to TOPOSLAB_VASP_PSEUDO_DIR.
@@ -1739,7 +1744,7 @@ nscf = [12, 12, 12]
 
 [transport]
 policy = "single_track" # single_track|dual_track_compare
-thicknesses = [3, 5, 7, 9, 11]
+thicknesses = [2, 4, 6, 8, 10, 12, 16, 20, 25]
 disorder_strengths = [0.0, 0.2]
 n_ensemble = 30
 n_jobs = 1
@@ -1760,26 +1765,21 @@ walltime = "00:30:00"
 # 0 = auto (uses all allocated cores for this queue/node profile).
 mpi_np = 0
 threads = 0
+# Kwant execution policy (transport stage only).
+kwant_enforce_1x64 = true
+require_mumps = true
+kwant_mode = "auto" # auto|sequential|task_parallel
+# 0 = auto (uses adaptive worker count in task_parallel mode).
+kwant_task_workers = 0
 # Optional override for transport worker python on cluster/login node.
 # If empty, falls back to [cluster].cluster_python_exe.
 cluster_python_exe = ""
 
-[transport.autotune]
-# Auto-pick transport (mpi_np, threads) profile for this queue/node class and cache result.
-enabled = true
-scope = "per_queue"
-cache_file = "~/.wtec/transport_autotune.json"
-benchmark_walltime = "00:08:00"
-benchmark_n_ensemble = 1
-[[transport.autotune.profiles]]
-mpi_np = 1
-threads = "all"
-[[transport.autotune.profiles]]
-mpi_np = 2
-threads = "half"
-[[transport.autotune.profiles]]
-mpi_np = 4
-threads = "quarter"
+[logging]
+detail = "per_ensemble" # minimal|per_step|per_ensemble
+heartbeat_seconds = 20
+stream_from_start = true
+retrieve_on_failure = true
 
 [topology]
 enabled = true
@@ -1793,10 +1793,15 @@ max_concurrent_variant_dft_jobs = 1
 variant_discovery_glob = "slab_variants/*.generated.meta.json"
 arc_engine = "siesta_slab_ldos"
 arc_allow_proxy_fallback = false
-siesta_slab_ldos_autogen = "kwant_proxy" # kwant_proxy|disabled
+arc_kmesh_xy = [8, 8]
+arc_broadening_ev = 0.06
+siesta_slab_ldos_autogen = "tb_kresolved" # tb_kresolved|kwant_proxy|disabled
 node_method = "wannierberri_flux"
 hr_scope = "per_variant"
 variant_dft_engine = "siesta"
+# Arc geometry: n_layers_y >= 16 resolves TaP arc k-width (~0.15 Å⁻¹ → W >> 42 Å at a=3.30 Å)
+n_layers_x = 4  # >= 2 required for Kwant lead attachment; >= 4 recommended
+n_layers_y = 16  # arc resolution: covers full transverse BZ arc extent for TaP/NbP
 walltime_per_point = "00:30:00"
 
 [topology.kmesh]
@@ -1844,6 +1849,22 @@ n_ensemble = 1
 disorder_strength = 0.0
 energy_shift_ev = 0.0
 thickness_axis = "z"
+
+[benchmark.force_stress]
+enabled = false
+# Reference VASP OUTCAR used for strict force/stress throughput benchmarking.
+reference_vasp_outcar = "/home/msj/Desktop/playground/ni-si-dev/actual_potential_run/cpu_work/vasp_runs/iter_000/frame_002/OUTCAR"
+# Optional explicit POSCAR path. If empty, sibling POSCAR of reference_vasp_outcar is used.
+reference_poscar = ""
+queue = "g3"
+cases = "32x1,16x2,8x4,4x8"
+kmesh = "2,2,2"
+mesh_cutoff_ry = 300.0
+spin_mode = "polarized" # non-polarized|polarized|spin-orbit
+force_threshold = 0.03
+stress_threshold_kbar = 0.5
+energy_threshold_mev_atom = 2.0
+target_speedup = 3.0
 
 [report]
 enabled = true
@@ -3482,6 +3503,102 @@ def _validate_axis_value(value, name: str) -> None:
         raise click.UsageError(f"{name} must be one of ['x','y','z'], got {value!r}")
 
 
+def _resolve_mp_api_key_for_pes_reference(cfg: dict[str, Any]) -> str:
+    direct_raw = cfg.get("mp_api_key")
+    if isinstance(direct_raw, str) and direct_raw.strip():
+        return direct_raw.strip()
+
+    env_name_raw = cfg.get("mp_api_key_env")
+    env_names: list[str] = []
+    if isinstance(env_name_raw, str) and env_name_raw.strip():
+        env_names.append(env_name_raw.strip())
+    env_names.extend(["MP_API_KEY", "PMG_MAPI_KEY"])
+
+    seen: set[str] = set()
+    for name in env_names:
+        key = name.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        val = os.environ.get(key, "").strip()
+        if val:
+            return val
+    return ""
+
+
+def _ensure_pes_reference_structure_from_mp(cfg: dict[str, Any]) -> str:
+    existing_raw = cfg.get("dft_pes_reference_structure_file")
+    if isinstance(existing_raw, str) and existing_raw.strip():
+        return existing_raw.strip()
+
+    mp_id_raw = cfg.get("dft_pes_reference_mp_id")
+    mp_id = str(mp_id_raw).strip() if mp_id_raw is not None else ""
+    if not mp_id:
+        return ""
+
+    api_key = _resolve_mp_api_key_for_pes_reference(cfg)
+    if not api_key:
+        raise click.UsageError(
+            "dft_pes_reference_mp_id is set but Materials Project API key is missing. "
+            "Set MP_API_KEY (or PMG_MAPI_KEY), or provide dft_pes_reference_structure_file."
+        )
+
+    try:
+        from mp_api.client import MPRester
+    except Exception as exc:
+        raise click.UsageError(
+            "mp-api is required to fetch PES reference structure from MP ID. "
+            "Run `wtec init` to install dependencies."
+        ) from exc
+
+    config_dir_raw = cfg.get("_runtime_config_dir")
+    if isinstance(config_dir_raw, str) and config_dir_raw.strip():
+        config_dir = Path(config_dir_raw).expanduser().resolve()
+    else:
+        config_dir = Path.cwd().resolve()
+    refs_dir = config_dir / "references"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+
+    material = str(cfg.get("material", "material")).strip() or "material"
+    primitive = bool(cfg.get("dft_pes_reference_use_primitive", True))
+    tag = "primitive" if primitive else "conventional"
+    safe_mp_id = re.sub(r"[^A-Za-z0-9._-]+", "_", mp_id)
+    out_path = refs_dir / f"{material}_{tag}_{safe_mp_id}.cif"
+    if out_path.exists() and out_path.stat().st_size > 0:
+        cfg["dft_pes_reference_structure_file"] = str(out_path.resolve())
+        return str(out_path.resolve())
+
+    try:
+        with MPRester(api_key) as mpr:
+            structure = mpr.get_structure_by_material_id(mp_id)
+        if isinstance(structure, list):
+            if not structure:
+                raise RuntimeError(f"no structure returned for {mp_id}")
+            structure = structure[0]
+        if isinstance(structure, dict):
+            from pymatgen.core.structure import Structure
+
+            structure = Structure.from_dict(structure)
+        if structure is None:
+            raise RuntimeError(f"failed to fetch structure for {mp_id}")
+        if primitive and hasattr(structure, "get_primitive_structure"):
+            structure = structure.get_primitive_structure()
+        structure.to(filename=str(out_path), fmt="cif")
+    except Exception as exc:
+        raise click.UsageError(
+            f"Failed to generate PES reference CIF from MP ID {mp_id}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    cfg["dft_pes_reference_structure_file"] = str(out_path.resolve())
+    click.echo(
+        click.style(
+            f"[preflight] generated PES reference CIF from {mp_id}: {out_path}",
+            fg="cyan",
+        )
+    )
+    return str(out_path.resolve())
+
+
 def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
     stage_norm = _normalize_stage(stage)
     workspace = Path.home() / ".wtec"
@@ -3561,6 +3678,31 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             raise click.UsageError("hybrid mode requires QE as dft reference engine.")
         if variant_dft_engine != "siesta":
             raise click.UsageError("hybrid mode requires topology.variant_dft_engine='siesta'.")
+        if not transport_only:
+            needs_dft = (
+                resume
+                or stage_norm is None
+                or stage_norm in {"DFT_SCF", "DFT_NSCF", "WANNIER90", "TRANSPORT", "ANALYSIS"}
+            )
+            if needs_dft:
+                pes_reference_structure = _ensure_pes_reference_structure_from_mp(cfg).strip()
+                if not pes_reference_structure:
+                    raise click.UsageError(
+                        "hybrid_qe_ref_siesta_variants mode requires "
+                        "dft.reference.structure_file "
+                        "or dft.reference.mp_id "
+                        "(runtime keys: dft_pes_reference_structure_file or dft_pes_reference_mp_id) "
+                        "for small PES reference."
+                    )
+                pes_path = Path(pes_reference_structure).expanduser()
+                if not pes_path.exists():
+                    raise click.UsageError(
+                        f"dft_pes_reference_structure_file does not exist: {pes_path}"
+                    )
+                if pes_path.stat().st_size == 0:
+                    raise click.UsageError(
+                        f"dft_pes_reference_structure_file is empty: {pes_path}"
+                    )
     else:  # dual_family
         if dft_engine not in {"qe", "vasp"}:
             raise click.UsageError(
@@ -3570,9 +3712,6 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             raise click.UsageError(
                 "dual_family mode requires dft_lcao_engine in ['siesta','abacus']."
             )
-        pes_reference_structure = str(
-            cfg.get("dft_pes_reference_structure_file", "")
-        ).strip()
         if not transport_only:
             needs_dft = (
                 resume
@@ -3580,10 +3719,13 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 or stage_norm in {"DFT_SCF", "DFT_NSCF", "WANNIER90", "TRANSPORT", "ANALYSIS"}
             )
             if needs_dft:
+                pes_reference_structure = _ensure_pes_reference_structure_from_mp(cfg).strip()
                 if not pes_reference_structure:
                     raise click.UsageError(
                         "dual_family mode requires dft.tracks.pes_reference.structure_file "
-                        "(runtime key: dft_pes_reference_structure_file) for small PES reference."
+                        "or dft.tracks.pes_reference.mp_id "
+                        "(runtime keys: dft_pes_reference_structure_file or dft_pes_reference_mp_id) "
+                        "for small PES reference."
                     )
                 pes_path = Path(pes_reference_structure).expanduser()
                 if not pes_path.exists():
@@ -3680,6 +3822,16 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 "dft.siesta.wannier_interface currently supports only 'sisl' in this workflow."
             )
     if siesta_cfg:
+        if "variant_kpoints_scf" in siesta_cfg:
+            _validate_positive_int_triplet(
+                siesta_cfg.get("variant_kpoints_scf"),
+                "dft.siesta.variant_kpoints_scf",
+            )
+        if "variant_kpoints_nscf" in siesta_cfg:
+            _validate_positive_int_triplet(
+                siesta_cfg.get("variant_kpoints_nscf"),
+                "dft.siesta.variant_kpoints_nscf",
+            )
         for key in ("mpi_np_scf", "mpi_np_nscf", "mpi_np_wannier"):
             if key in siesta_cfg:
                 try:
@@ -3902,48 +4054,22 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
         raise click.UsageError("transport_mpi_np must be >= 0 (0 means auto).")
     if "transport_threads" in cfg and int(cfg["transport_threads"]) < 0:
         raise click.UsageError("transport_threads must be >= 0 (0 means auto).")
-    transport_autotune_cfg = cfg.get("transport_autotune")
-    if transport_autotune_cfg is not None:
-        if not isinstance(transport_autotune_cfg, dict):
-            raise click.UsageError("transport_autotune must be a JSON object when provided.")
-        scope = str(transport_autotune_cfg.get("scope", "per_queue")).strip().lower() or "per_queue"
-        if scope != "per_queue":
-            raise click.UsageError("transport_autotune.scope currently supports only 'per_queue'.")
-        if "enabled" in transport_autotune_cfg and not isinstance(
-            transport_autotune_cfg.get("enabled"), bool
-        ):
-            raise click.UsageError("transport_autotune.enabled must be a boolean.")
-        if "benchmark_n_ensemble" in transport_autotune_cfg and int(
-            transport_autotune_cfg.get("benchmark_n_ensemble")
-        ) <= 0:
-            raise click.UsageError("transport_autotune.benchmark_n_ensemble must be > 0.")
-        profiles = transport_autotune_cfg.get("profiles")
-        if profiles is not None:
-            if not isinstance(profiles, list) or not profiles:
-                raise click.UsageError("transport_autotune.profiles must be a non-empty list.")
-            for idx, prof in enumerate(profiles):
-                if not isinstance(prof, dict):
-                    raise click.UsageError(f"transport_autotune.profiles[{idx}] must be an object.")
-                if int(prof.get("mpi_np", 1)) <= 0:
-                    raise click.UsageError(
-                        f"transport_autotune.profiles[{idx}].mpi_np must be > 0."
-                    )
-                thr = prof.get("threads", "all")
-                if isinstance(thr, int):
-                    if int(thr) <= 0:
-                        raise click.UsageError(
-                            f"transport_autotune.profiles[{idx}].threads must be > 0."
-                        )
-                elif isinstance(thr, str):
-                    if not str(thr).strip():
-                        raise click.UsageError(
-                            f"transport_autotune.profiles[{idx}].threads cannot be empty."
-                        )
-                else:
-                    raise click.UsageError(
-                        f"transport_autotune.profiles[{idx}].threads must be int or string."
-                    )
-
+    if "transport_kwant_task_workers" in cfg and int(cfg["transport_kwant_task_workers"]) < 0:
+        raise click.UsageError("transport_kwant_task_workers must be >= 0 (0 means auto).")
+    if "transport_kwant_mode" in cfg:
+        km = str(cfg["transport_kwant_mode"]).strip().lower()
+        if km not in {"auto", "sequential", "task_parallel"}:
+            raise click.UsageError(
+                "transport_kwant_mode must be one of ['auto','sequential','task_parallel']."
+            )
+    if "runtime_logging_detail" in cfg:
+        ld = str(cfg["runtime_logging_detail"]).strip().lower()
+        if ld not in {"minimal", "per_step", "per_ensemble"}:
+            raise click.UsageError(
+                "runtime_logging_detail must be one of ['minimal','per_step','per_ensemble']."
+            )
+    if "runtime_logging_heartbeat_seconds" in cfg and int(cfg["runtime_logging_heartbeat_seconds"]) <= 0:
+        raise click.UsageError("runtime_logging_heartbeat_seconds must be > 0.")
     topo_cfg = cfg.get("topology")
     if topo_cfg is not None:
         if not isinstance(topo_cfg, dict):
@@ -3982,12 +4108,32 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             topo_cfg.get("arc_allow_proxy_fallback"), bool
         ):
             raise click.UsageError("topology.arc_allow_proxy_fallback must be a boolean.")
+        if "arc_kmesh_xy" in topo_cfg:
+            ak = topo_cfg.get("arc_kmesh_xy")
+            if not isinstance(ak, (list, tuple)) or len(ak) != 2:
+                raise click.UsageError("topology.arc_kmesh_xy must be a 2-element integer list.")
+            if int(ak[0]) <= 0 or int(ak[1]) <= 0:
+                raise click.UsageError("topology.arc_kmesh_xy entries must be > 0.")
+        if "arc_broadening_ev" in topo_cfg:
+            if float(topo_cfg.get("arc_broadening_ev")) <= 0.0:
+                raise click.UsageError("topology.arc_broadening_ev must be > 0.")
         if "siesta_slab_ldos_autogen" in topo_cfg:
             mode = str(topo_cfg.get("siesta_slab_ldos_autogen", "")).strip().lower()
-            if mode not in {"kwant_proxy", "none", "off", "disabled", "false", "no"}:
+            if mode not in {
+                "tb_kresolved",
+                "tb_surface_kresolved",
+                "kresolved",
+                "kwant_proxy",
+                "none",
+                "off",
+                "disabled",
+                "false",
+                "no",
+            }:
                 raise click.UsageError(
                     "topology.siesta_slab_ldos_autogen must be one of "
-                    "['kwant_proxy','none','off','disabled','false','no']."
+                    "['tb_kresolved','tb_surface_kresolved','kresolved',"
+                    "'kwant_proxy','none','off','disabled','false','no']."
                 )
         if "node_method" in topo_cfg:
             nm = str(topo_cfg["node_method"]).strip().lower()
@@ -4178,6 +4324,14 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 raise click.UsageError(
                     "strict run_profile requires non-proxy arc engine "
                     "('siesta_slab_ldos' or strict WannierBerri mode)."
+                )
+            autogen_mode = str(
+                topo_cfg.get("siesta_slab_ldos_autogen", "tb_kresolved")
+            ).strip().lower()
+            if arc_engine == "siesta_slab_ldos" and autogen_mode in {"kwant_proxy", "kwant"}:
+                raise click.UsageError(
+                    "strict run_profile forbids topology.siesta_slab_ldos_autogen='kwant_proxy'. "
+                    "Use 'tb_kresolved' or provide explicit slab LDOS JSON payloads."
                 )
             if str(topo_cfg.get("backend", "qsub")).strip().lower() != "qsub":
                 raise click.UsageError("strict run_profile requires topology.backend='qsub'.")
@@ -4769,12 +4923,33 @@ def _normalize_dft_track_config(
         else:
             pes_ref_struct = str(Path(pes_ref_struct_raw).expanduser())
 
+    pes_ref_mp_id_raw = cfg.get("dft_pes_reference_mp_id")
+    if pes_ref_mp_id_raw is None:
+        pes_ref_mp_id_raw = pes_track.get("mp_id")
+    if pes_ref_mp_id_raw is None:
+        pes_ref_mp_id_raw = ref_tbl.get("mp_id")
+    pes_ref_mp_id = ""
+    if isinstance(pes_ref_mp_id_raw, str):
+        pes_ref_mp_id = pes_ref_mp_id_raw.strip()
+    elif pes_ref_mp_id_raw is not None:
+        pes_ref_mp_id = str(pes_ref_mp_id_raw).strip()
+
+    pes_ref_use_primitive_raw = cfg.get("dft_pes_reference_use_primitive")
+    if pes_ref_use_primitive_raw is None:
+        pes_ref_use_primitive_raw = pes_track.get("use_primitive")
+    if pes_ref_use_primitive_raw is None:
+        pes_ref_use_primitive_raw = ref_tbl.get("use_primitive")
+    pes_ref_use_primitive = True if pes_ref_use_primitive_raw is None else bool(pes_ref_use_primitive_raw)
+
     cfg["dft_mode"] = mode
     cfg["dft_pes_engine"] = pes_engine
     cfg["dft_lcao_engine"] = lcao_engine
     cfg["dft_lcao_source"] = lcao_source
     if pes_ref_struct:
         cfg["dft_pes_reference_structure_file"] = pes_ref_struct
+    if pes_ref_mp_id:
+        cfg["dft_pes_reference_mp_id"] = pes_ref_mp_id
+    cfg["dft_pes_reference_use_primitive"] = bool(pes_ref_use_primitive)
 
     anchor_flat = cfg.get("dft_anchor_transfer", {})
     anchor_flat = anchor_flat if isinstance(anchor_flat, dict) else {}
@@ -4873,11 +5048,7 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
     )
     dft_disp = dft.get("dispersion", {}) if isinstance(dft.get("dispersion"), dict) else {}
     transport = data.get("transport", {}) if isinstance(data.get("transport"), dict) else {}
-    transport_autotune = (
-        transport.get("autotune", {})
-        if isinstance(transport.get("autotune"), dict)
-        else {}
-    )
+    logging_cfg = data.get("logging", {}) if isinstance(data.get("logging"), dict) else {}
     topo = data.get("topology", {}) if isinstance(data.get("topology"), dict) else {}
     topo_k = topo.get("kmesh", {}) if isinstance(topo.get("kmesh"), dict) else {}
     topo_res = topo.get("resources", {}) if isinstance(topo.get("resources"), dict) else {}
@@ -4938,17 +5109,37 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
         else dft_reference.get("structure_file"),
         base=base,
     )
+    pes_reference_mp_id_raw = (
+        pes_track.get("mp_id")
+        if isinstance(pes_track.get("mp_id"), str)
+        else dft_reference.get("mp_id")
+    )
+    pes_reference_mp_id = (
+        str(pes_reference_mp_id_raw).strip()
+        if pes_reference_mp_id_raw is not None
+        else ""
+    )
+    pes_reference_use_primitive = bool(
+        pes_track.get(
+            "use_primitive",
+            dft_reference.get("use_primitive", True),
+        )
+    )
     lcao_source = str(lcao_track.get("source", "variants")).strip().lower() or "variants"
 
     cfg: dict[str, Any] = {
         "name": run_name,
         "material": str(run.get("material", project.get("material", "TaP"))),
+        "mp_api_key": str(project.get("mp_api_key", "")).strip(),
+        "mp_api_key_env": str(project.get("mp_api_key_env", "MP_API_KEY")).strip() or "MP_API_KEY",
         "run_profile": str(run.get("profile", "strict")).strip().lower() or "strict",
         "dft_mode": dft_mode,
         "dft_engine": dft_engine_cfg,
         "dft_pes_engine": dft_engine_cfg,
         "dft_lcao_engine": variant_engine_cfg,
         "dft_pes_reference_structure_file": pes_reference_structure,
+        "dft_pes_reference_mp_id": pes_reference_mp_id,
+        "dft_pes_reference_use_primitive": pes_reference_use_primitive,
         "dft_lcao_source": lcao_source,
         "dft_reuse_mode": str(dft.get("reuse_mode", "none")).strip().lower() or "none",
         "dft_anchor_transfer": {
@@ -4982,6 +5173,14 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
             "wannier_interface": str(dft_siesta.get("wannier_interface", "sisl")).strip().lower() or "sisl",
             "pseudo_dir": str(dft_siesta.get("pseudo_dir", "")).strip(),
             "basis_profile": str(dft_siesta.get("basis_profile", "")).strip(),
+            "variant_kpoints_scf": _int_list3(
+                dft_siesta.get("variant_kpoints_scf"),
+                default=(4, 4, 4),
+            ),
+            "variant_kpoints_nscf": _int_list3(
+                dft_siesta.get("variant_kpoints_nscf"),
+                default=(6, 6, 6),
+            ),
             "mpi_np_scf": int(dft_siesta.get("mpi_np_scf", 0)),
             "mpi_np_nscf": int(dft_siesta.get("mpi_np_nscf", 0)),
             "mpi_np_wannier": int(dft_siesta.get("mpi_np_wannier", 0)),
@@ -4993,10 +5192,10 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
                 if isinstance(dft_siesta.get("factorization_defaults"), dict)
                 else {}
             ),
-            "dm_mixing_weight": float(dft_siesta.get("dm_mixing_weight", 0.10)),
-            "dm_number_pulay": int(dft_siesta.get("dm_number_pulay", 8)),
+            "dm_mixing_weight": float(dft_siesta.get("dm_mixing_weight", 0.18)),
+            "dm_number_pulay": int(dft_siesta.get("dm_number_pulay", 6)),
             "electronic_temperature_k": float(dft_siesta.get("electronic_temperature_k", 300.0)),
-            "max_scf_iterations": int(dft_siesta.get("max_scf_iterations", 200)),
+            "max_scf_iterations": int(dft_siesta.get("max_scf_iterations", 120)),
         },
         "dft_vasp": {
             "pseudo_dir": str(dft_vasp.get("pseudo_dir", "")).strip(),
@@ -5068,29 +5267,18 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
         "transport_walltime": str(transport.get("walltime", "00:30:00")),
         "transport_mpi_np": int(transport.get("mpi_np", 0)),
         "transport_threads": int(transport.get("threads", 0)),
+        "transport_kwant_enforce_1x64": bool(transport.get("kwant_enforce_1x64", True)),
+        "transport_require_mumps": bool(transport.get("require_mumps", True)),
+        "transport_kwant_task_workers": int(transport.get("kwant_task_workers", 0)),
+        "transport_kwant_mode": str(transport.get("kwant_mode", "auto")).strip().lower() or "auto",
         "transport_cluster_python_exe": str(
             transport.get("cluster_python_exe", cluster.get("cluster_python_exe", "python3"))
         ),
-        "transport_autotune": {
-            "enabled": bool(transport_autotune.get("enabled", True)),
-            "scope": str(transport_autotune.get("scope", "per_queue")).strip().lower() or "per_queue",
-            "cache_file": str(
-                transport_autotune.get("cache_file", "~/.wtec/transport_autotune.json")
-            ).strip() or "~/.wtec/transport_autotune.json",
-            "profiles": (
-                transport_autotune.get("profiles")
-                if isinstance(transport_autotune.get("profiles"), list)
-                else [
-                    {"mpi_np": 1, "threads": "all"},
-                    {"mpi_np": 2, "threads": "half"},
-                    {"mpi_np": 4, "threads": "quarter"},
-                ]
-            ),
-            "benchmark_walltime": str(
-                transport_autotune.get("benchmark_walltime", "00:08:00")
-            ).strip() or "00:08:00",
-            "benchmark_n_ensemble": int(transport_autotune.get("benchmark_n_ensemble", 1)),
-        },
+        "runtime_logging_detail": str(logging_cfg.get("detail", "per_ensemble")).strip().lower()
+        or "per_ensemble",
+        "runtime_logging_heartbeat_seconds": int(logging_cfg.get("heartbeat_seconds", 20)),
+        "runtime_stream_from_start": bool(logging_cfg.get("stream_from_start", True)),
+        "runtime_retrieve_on_failure": bool(logging_cfg.get("retrieve_on_failure", True)),
         "topology": {
             "enabled": bool(topo.get("enabled", True)),
             "backend": str(topo.get("backend", "qsub")),
@@ -5112,10 +5300,19 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
             "n_layers_y": int(topo.get("n_layers_y", int(transport.get("transport_n_layers_y", 4)))),
             "arc_engine": str(topo.get("arc_engine", "siesta_slab_ldos")),
             "arc_allow_proxy_fallback": bool(topo.get("arc_allow_proxy_fallback", False)),
+            "arc_kmesh_xy": [
+                int(v)
+                for v in (
+                    topo.get("arc_kmesh_xy")
+                    if isinstance(topo.get("arc_kmesh_xy"), (list, tuple))
+                    else [8, 8]
+                )
+            ][:2],
+            "arc_broadening_ev": float(topo.get("arc_broadening_ev", 0.06)),
             "siesta_slab_ldos_autogen": str(
-                topo.get("siesta_slab_ldos_autogen", "kwant_proxy")
+                topo.get("siesta_slab_ldos_autogen", "tb_kresolved")
             ).strip().lower()
-            or "kwant_proxy",
+            or "tb_kresolved",
             "node_method": str(topo.get("node_method", "wannierberri_flux")),
             "hr_scope": str(topo.get("hr_scope", "per_variant")),
             "caveat_reuse_global_hr_dat": bool(topo.get("caveat_reuse_global_hr_dat", False)),
@@ -5284,6 +5481,8 @@ def _compute_transport_signature(
     *,
     min_mfp_nm: float,
 ) -> dict[str, Any]:
+    import numpy as np
+
     curve = _select_zero_disorder_scan(transport_results)
     if not isinstance(curve, dict):
         return {
@@ -5342,9 +5541,32 @@ def _compute_transport_signature(
     points.sort(key=lambda x: x[0])  # ascending thickness
     thickness_uc = [p[0] for p in points]
     rho_vals = [p[1] for p in points]
+    rho_arr = np.asarray(rho_vals, dtype=float)
     idx_min = min(range(len(rho_vals)), key=lambda i: rho_vals[i])
+    idx_max = max(range(len(rho_vals)), key=lambda i: rho_vals[i])
     has_minimum = (0 < idx_min < (len(rho_vals) - 1))
+    has_maximum = (0 < idx_max < (len(rho_vals) - 1))
     thinning_reduces_rho = bool(rho_vals[0] < rho_vals[-1])
+    endpoint_delta = float(rho_vals[-1] - rho_vals[0])
+    endpoint_ratio = float(rho_vals[-1] / max(abs(rho_vals[0]), 1e-30))
+
+    eps = max(1e-12, 1e-6 * float(np.max(np.abs(rho_arr))))
+    dr = np.diff(rho_arr)
+    has_pos = bool(np.any(dr > eps))
+    has_neg = bool(np.any(dr < -eps))
+    if has_pos and not has_neg:
+        rho_trend_class = "monotonic_increasing_with_thickness"
+    elif has_neg and not has_pos:
+        rho_trend_class = "monotonic_decreasing_with_thickness"
+    elif has_pos and has_neg:
+        if has_minimum and not has_maximum:
+            rho_trend_class = "u_shaped_nonmonotonic"
+        elif has_maximum and not has_minimum:
+            rho_trend_class = "inverted_u_nonmonotonic"
+        else:
+            rho_trend_class = "multi_extrema_nonmonotonic"
+    else:
+        rho_trend_class = "flat_or_nearly_flat"
 
     d_min_nm = None
     if points[idx_min][2] is not None:
@@ -5369,6 +5591,14 @@ def _compute_transport_signature(
         "n_curve_points": int(len(points)),
         "thickness_uc": thickness_uc,
         "rho_at_thickness_uc": {str(t): float(r) for t, r in zip(thickness_uc, rho_vals)},
+        "rho_endpoints": {
+            "thinnest_thickness_uc": int(thickness_uc[0]),
+            "thickest_thickness_uc": int(thickness_uc[-1]),
+            "rho_thinnest": float(rho_vals[0]),
+            "rho_thickest": float(rho_vals[-1]),
+            "delta_thick_minus_thin": float(endpoint_delta),
+            "ratio_thick_over_thin": float(endpoint_ratio),
+        },
         "rho_minimum": {
             "has_minimum": bool(has_minimum),
             "thickness_uc": int(thickness_uc[idx_min]),
@@ -5376,8 +5606,15 @@ def _compute_transport_signature(
             "rho": float(rho_vals[idx_min]),
             "index": int(idx_min),
         },
+        "rho_maximum": {
+            "has_maximum": bool(has_maximum),
+            "thickness_uc": int(thickness_uc[idx_max]),
+            "rho": float(rho_vals[idx_max]),
+            "index": int(idx_max),
+        },
         "has_rho_minimum": bool(has_minimum),
         "thinning_reduces_rho": thinning_reduces_rho,
+        "rho_trend_class": rho_trend_class,
         "mfp_nm": mfp_nm,
         "mfp_available": mfp_available,
         "mfp_huge": mfp_huge,
@@ -5483,7 +5720,7 @@ def _compute_scientific_validity(
                 if node_req == "proxy" or node_eff == "proxy":
                     proxy_used = True
                     break
-                if node_req == "wannierberri_flux" and node_eff != "wannierberri_flux":
+                if node_req == "wannierberri_flux" and node_eff in {"", "none", "proxy"}:
                     proxy_used = True
                     break
                 arc_engine = str(row.get("arc_engine", "")).strip().lower()
@@ -5816,6 +6053,7 @@ def run(
         raise click.UsageError("--stale-log-seconds must be > 0")
 
     cfg = _load_run_config(config_path)
+    cfg["_runtime_config_dir"] = str(config_path.parent.resolve())
 
     runtime_env_updates = _collect_env_updates(
         cluster_host=cluster_host,
@@ -6028,6 +6266,653 @@ def status(job_id: str | None, show_all: bool) -> None:
                     click.echo(f"  {f.stem}: stage={stage}  job=—")
         else:
             click.echo("Pass --job-id JOB_ID or --all")
+
+
+# ---------------------------------------------------------------------------
+# wtec benchmark-force-stress
+# ---------------------------------------------------------------------------
+
+def _parse_case_matrix_spec(raw: str) -> list[tuple[int, int]]:
+    specs: list[tuple[int, int]] = []
+    for token in str(raw).split(","):
+        t = token.strip()
+        if not t:
+            continue
+        m = re.fullmatch(r"(\d+)\s*[xX]\s*(\d+)", t)
+        if not m:
+            raise click.UsageError(
+                f"Invalid case token {t!r}. Use comma-separated 'MPIxTHREADS' format, "
+                "e.g. '32x1,16x2,8x4,4x8'."
+            )
+        mpi_np = int(m.group(1))
+        threads = int(m.group(2))
+        if mpi_np <= 0 or threads <= 0:
+            raise click.UsageError(f"Invalid case token {t!r}: MPI and threads must be > 0.")
+        specs.append((mpi_np, threads))
+    if not specs:
+        raise click.UsageError("At least one case must be provided in --cases.")
+    return specs
+
+
+def _parse_int_triplet(raw: str, *, label: str) -> tuple[int, int, int]:
+    parts = [p.strip() for p in str(raw).split(",") if p.strip()]
+    if len(parts) != 3:
+        raise click.UsageError(f"{label} must be 'a,b,c' with exactly 3 integers.")
+    try:
+        vals = tuple(int(p) for p in parts)
+    except Exception as exc:
+        raise click.UsageError(f"{label} must be integer triplet: {exc}") from exc
+    if any(v <= 0 for v in vals):
+        raise click.UsageError(f"{label} values must be > 0.")
+    return vals  # type: ignore[return-value]
+
+
+def _parse_symbol_map(items: tuple[str, ...]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in items:
+        raw = str(item).strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            k, v = raw.split("=", 1)
+        elif ":" in raw:
+            k, v = raw.split(":", 1)
+        else:
+            raise click.UsageError(
+                f"Invalid --pseudo-map entry {raw!r}. Use SYMBOL=FILE, e.g. Ni=Ni.psf."
+            )
+        sym = k.strip()
+        fn = v.strip()
+        if not sym or not fn:
+            raise click.UsageError(f"Invalid --pseudo-map entry {raw!r}.")
+        out[sym] = fn
+    return out
+
+
+def _render_siesta_benchmark_fdf(
+    *,
+    label: str,
+    atoms,
+    pseudo_dir: str,
+    pseudopotentials: dict[str, str],
+    kmesh: tuple[int, int, int],
+    mesh_cutoff_ry: float,
+    dm_mixing_weight: float,
+    dm_number_pulay: int,
+    electronic_temperature_k: float,
+    max_scf_iterations: int,
+    spin_mode: str,
+) -> str:
+    syms: list[str] = []
+    for sym in atoms.get_chemical_symbols():
+        if sym not in syms:
+            syms.append(sym)
+    species_index = {sym: i for i, sym in enumerate(syms, start=1)}
+
+    spin_text = {
+        "non-polarized": "non-polarized",
+        "polarized": "polarized",
+        "spin-orbit": "spin-orbit",
+    }.get(spin_mode, "polarized")
+
+    lines: list[str] = [
+        f"SystemName        {label}",
+        f"SystemLabel       {label}",
+        f"NumberOfSpecies   {len(syms)}",
+        f"NumberOfAtoms     {len(atoms)}",
+        "LatticeConstant   1.0 Ang",
+        "",
+        "%block LatticeVectors",
+    ]
+    for vec in atoms.cell.array:
+        lines.append(f"{float(vec[0]): .10f}  {float(vec[1]): .10f}  {float(vec[2]): .10f}")
+    lines.extend(
+        [
+            "%endblock LatticeVectors",
+            "",
+            f"PseudoPotDir      {pseudo_dir}",
+            "%block ChemicalSpeciesLabel",
+        ]
+    )
+    from ase.data import atomic_numbers
+
+    for sym in syms:
+        z = int(atomic_numbers[sym])
+        pp = pseudopotentials[sym]
+        lines.append(f"{species_index[sym]}  {z}  {sym}   {pp}")
+    lines.extend(
+        [
+            "%endblock ChemicalSpeciesLabel",
+            "",
+            "AtomicCoordinatesFormat Ang",
+            "%block AtomicCoordinatesAndAtomicSpecies",
+        ]
+    )
+    for sym, (x, y, z) in zip(atoms.get_chemical_symbols(), atoms.get_positions()):
+        lines.append(
+            f"{float(x): .10f}  {float(y): .10f}  {float(z): .10f}  {species_index[sym]}   {sym}"
+        )
+    lines.extend(
+        [
+            "%endblock AtomicCoordinatesAndAtomicSpecies",
+            "",
+            "XC.functional     GGA",
+            "XC.authors        PBE",
+            f"MeshCutoff        {float(mesh_cutoff_ry):g} Ry",
+            "PAO.BasisSize     DZP",
+            f"DM.MixingWeight   {float(dm_mixing_weight):.6f}",
+            f"DM.NumberPulay    {int(dm_number_pulay)}",
+            f"ElectronicTemperature  {float(electronic_temperature_k):g} K",
+            f"Spin              {spin_text}",
+            "",
+            "%block kgrid_Monkhorst_Pack",
+            f"{int(kmesh[0])}   0   0   0.0",
+            f"0   {int(kmesh[1])}   0   0.0",
+            f"0   0   {int(kmesh[2])}   0.0",
+            "%endblock kgrid_Monkhorst_Pack",
+            "",
+            "MaxSCFIterations  " + str(int(max_scf_iterations)),
+            "SCF.MustConverge  true",
+            "DM.UseSaveDM      false",
+            "Diag.ParallelOverK   true",
+            "Diag.Use2D           false",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+@main.command("benchmark-force-stress")
+@click.option(
+    "--vasp-outcar",
+    default=_DEFAULT_FORCE_STRESS_REFERENCE_OUTCAR,
+    show_default=True,
+    help="VASP reference OUTCAR path (local path or remote cluster path).",
+)
+@click.option(
+    "--vasp-poscar",
+    default=None,
+    help="Reference POSCAR path. Defaults to sibling of --vasp-outcar.",
+)
+@click.option(
+    "--output-dir",
+    default="",
+    help="Local output directory. Default: ./benchmarks/force_stress_<timestamp>",
+)
+@click.option("--queue", default="g3", show_default=True, help="PBS queue for benchmark submissions.")
+@click.option("--n-nodes", type=int, default=1, show_default=True, help="Nodes per benchmark case.")
+@click.option("--walltime", default="02:00:00", show_default=True, help="PBS walltime per benchmark case.")
+@click.option(
+    "--cases",
+    default="32x1,16x2,8x4,4x8",
+    show_default=True,
+    help="Comma-separated benchmark cases as MPIxTHREADS.",
+)
+@click.option("--kmesh", default="2,2,2", show_default=True, help="SIESTA SCF k-mesh as a,b,c.")
+@click.option("--mesh-cutoff-ry", type=float, default=300.0, show_default=True, help="SIESTA MeshCutoff (Ry).")
+@click.option(
+    "--spin-mode",
+    type=click.Choice(["non-polarized", "polarized", "spin-orbit"], case_sensitive=False),
+    default="polarized",
+    show_default=True,
+    help="SIESTA spin mode for candidate runs.",
+)
+@click.option("--dm-mixing-weight", type=float, default=0.10, show_default=True)
+@click.option("--dm-number-pulay", type=int, default=8, show_default=True)
+@click.option("--electronic-temperature-k", type=float, default=300.0, show_default=True)
+@click.option("--max-scf-iterations", type=int, default=200, show_default=True)
+@click.option(
+    "--siesta-executable",
+    default="siesta",
+    show_default=True,
+    help="SIESTA executable available on cluster PATH/modules.",
+)
+@click.option(
+    "--siesta-pseudo-dir",
+    default=None,
+    help="Override TOPOSLAB_SIESTA_PSEUDO_DIR for benchmark cases.",
+)
+@click.option(
+    "--pseudo-map",
+    "pseudo_map_entries",
+    multiple=True,
+    help="Override pseudo filename per element. Repeatable: --pseudo-map Ni=Ni.psf",
+)
+@click.option("--force-threshold", type=float, default=0.03, show_default=True, help="Force MAE threshold (eV/Ang).")
+@click.option(
+    "--stress-threshold-kbar",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="Stress MAE threshold (kbar).",
+)
+@click.option(
+    "--energy-threshold-mev-atom",
+    type=float,
+    default=2.0,
+    show_default=True,
+    help="Energy difference threshold (meV/atom).",
+)
+@click.option("--target-speedup", type=float, default=3.0, show_default=True, help="Minimum speedup vs reference.")
+@click.option("--poll-interval", type=int, default=20, show_default=True, help="Seconds between scheduler polls.")
+@click.option("--timeout-seconds", type=int, default=21600, show_default=True, help="Global benchmark timeout.")
+def benchmark_force_stress(
+    vasp_outcar: str,
+    vasp_poscar: str | None,
+    output_dir: str,
+    queue: str,
+    n_nodes: int,
+    walltime: str,
+    cases: str,
+    kmesh: str,
+    mesh_cutoff_ry: float,
+    spin_mode: str,
+    dm_mixing_weight: float,
+    dm_number_pulay: int,
+    electronic_temperature_k: float,
+    max_scf_iterations: int,
+    siesta_executable: str,
+    siesta_pseudo_dir: str | None,
+    pseudo_map_entries: tuple[str, ...],
+    force_threshold: float,
+    stress_threshold_kbar: float,
+    energy_threshold_mev_atom: float,
+    target_speedup: float,
+    poll_interval: int,
+    timeout_seconds: int,
+) -> None:
+    """Benchmark SIESTA force/stress throughput against a VASP reference."""
+    from ase import io as ase_io
+
+    from wtec.analysis.force_stress_benchmark import (
+        BenchmarkThresholds,
+        choose_fastest_passing_case,
+        compare_force_stress,
+        evaluate_thresholds,
+        load_siesta_result,
+        load_vasp_reference,
+        to_serializable_payload,
+    )
+    from wtec.cluster.pbs import PBSJobConfig, generate_script
+    from wtec.cluster.submit import JobManager
+    from wtec.cluster.ssh import open_ssh
+    from wtec.config.cluster import ClusterConfig
+
+    if n_nodes <= 0:
+        raise click.UsageError("--n-nodes must be > 0.")
+    if poll_interval <= 0:
+        raise click.UsageError("--poll-interval must be > 0.")
+    if timeout_seconds <= 0:
+        raise click.UsageError("--timeout-seconds must be > 0.")
+    if mesh_cutoff_ry <= 0.0:
+        raise click.UsageError("--mesh-cutoff-ry must be > 0.")
+    if dm_number_pulay <= 0:
+        raise click.UsageError("--dm-number-pulay must be > 0.")
+    if max_scf_iterations <= 0:
+        raise click.UsageError("--max-scf-iterations must be > 0.")
+    if force_threshold <= 0.0 or stress_threshold_kbar <= 0.0 or energy_threshold_mev_atom <= 0.0:
+        raise click.UsageError("Threshold values must be > 0.")
+    if target_speedup <= 0.0:
+        raise click.UsageError("--target-speedup must be > 0.")
+
+    case_specs = _parse_case_matrix_spec(cases)
+    kmesh_vals = _parse_int_triplet(kmesh, label="--kmesh")
+    pseudo_overrides = _parse_symbol_map(pseudo_map_entries)
+    thresholds = BenchmarkThresholds(
+        force_mae_eva=float(force_threshold),
+        stress_mae_kbar=float(stress_threshold_kbar),
+        energy_mev_per_atom=float(energy_threshold_mev_atom),
+        min_speedup=float(target_speedup),
+    )
+
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    run_root = (
+        Path(output_dir).expanduser().resolve()
+        if str(output_dir).strip()
+        else (Path.cwd() / "benchmarks" / f"force_stress_{stamp}")
+    )
+    run_root.mkdir(parents=True, exist_ok=True)
+    reference_local_dir = run_root / "reference"
+    reference_local_dir.mkdir(parents=True, exist_ok=True)
+    cases_local_dir = run_root / "cases"
+    cases_local_dir.mkdir(parents=True, exist_ok=True)
+
+    cfg = ClusterConfig.from_env()
+    pseudo_dir = str(siesta_pseudo_dir or cfg.siesta_pseudo_dir).strip()
+    if "$USER" in pseudo_dir:
+        pseudo_dir = pseudo_dir.replace("$USER", cfg.user or "$USER")
+    if not pseudo_dir:
+        raise click.ClickException("SIESTA pseudo directory is empty. Set TOPOSLAB_SIESTA_PSEUDO_DIR.")
+
+    outcar_input = str(vasp_outcar).strip()
+    poscar_input = str(vasp_poscar).strip() if vasp_poscar else ""
+
+    click.echo(click.style("[benchmark] Preparing VASP reference and SIESTA benchmark cases", fg="cyan"))
+
+    with open_ssh(cfg) as ssh:
+        jm = JobManager(ssh)
+        queue_used = jm.resolve_queue(queue or cfg.pbs_queue, fallback_order=cfg.pbs_queue_priority)
+        cores_per_node = cfg.cores_for_queue(queue_used)
+        total_cores = int(n_nodes) * int(cores_per_node)
+
+        def _materialize_reference_file(src: str, dst_name: str) -> Path:
+            p = Path(src).expanduser()
+            dst = reference_local_dir / dst_name
+            if p.exists():
+                dst.write_bytes(p.read_bytes())
+                return dst
+            rc, _, _ = ssh.run(f"test -s {shlex.quote(src)}", check=False)
+            if rc != 0:
+                raise click.ClickException(
+                    f"Reference file not found locally or on cluster: {src}"
+                )
+            ssh.get(src, str(dst))
+            return dst
+
+        local_outcar = _materialize_reference_file(outcar_input, "reference.OUTCAR")
+        if poscar_input:
+            local_poscar = _materialize_reference_file(poscar_input, "reference.POSCAR")
+        else:
+            if Path(outcar_input).expanduser().exists():
+                candidate = str(Path(outcar_input).expanduser().resolve().with_name("POSCAR"))
+            else:
+                candidate = str(Path(outcar_input).with_name("POSCAR"))
+            local_poscar = _materialize_reference_file(candidate, "reference.POSCAR")
+
+        reference = load_vasp_reference(local_outcar)
+        atoms = ase_io.read(str(local_poscar))
+        symbols = []
+        for sym in atoms.get_chemical_symbols():
+            if sym not in symbols:
+                symbols.append(sym)
+        pseudo_map = {sym: pseudo_overrides.get(sym, f"{sym}.psf") for sym in symbols}
+
+        missing_pseudos: list[str] = []
+        for sym, pp in pseudo_map.items():
+            remote_pp = f"{pseudo_dir.rstrip('/')}/{pp}"
+            rc, _, _ = ssh.run(f"test -s {shlex.quote(remote_pp)}", check=False)
+            if rc != 0:
+                missing_pseudos.append(f"{sym}:{remote_pp}")
+        if missing_pseudos:
+            raise click.ClickException(
+                "Missing required SIESTA pseudopotentials on cluster:\n  "
+                + "\n  ".join(missing_pseudos)
+            )
+
+        remote_workdir = str(cfg.remote_workdir).replace("$USER", cfg.user or "$USER")
+        remote_root = f"{remote_workdir.rstrip('/')}/force_stress_benchmark/{stamp}"
+        ssh.mkdir_p(remote_root)
+
+        submitted_cases: list[dict[str, Any]] = []
+        for idx, (mpi_np, threads) in enumerate(case_specs):
+            if mpi_np > total_cores:
+                raise click.UsageError(
+                    f"Case {mpi_np}x{threads} exceeds allocated cores ({total_cores})."
+                )
+            if mpi_np * threads > total_cores:
+                raise click.UsageError(
+                    f"Case {mpi_np}x{threads} oversubscribes cores ({total_cores})."
+                )
+
+            case_name = f"c{idx:02d}_{mpi_np}x{threads}"
+            case_label = f"FSBench_{mpi_np}x{threads}"
+            case_local_dir = cases_local_dir / case_name
+            case_local_dir.mkdir(parents=True, exist_ok=True)
+            case_remote_dir = f"{remote_root}/{case_name}"
+
+            fdf_name = f"{case_label}.scf.fdf"
+            out_name = f"{case_label}.scf.out"
+            times_name = f"{case_label}.times"
+            fdf_path = case_local_dir / fdf_name
+            fdf_path.write_text(
+                _render_siesta_benchmark_fdf(
+                    label=case_label,
+                    atoms=atoms,
+                    pseudo_dir=".",
+                    pseudopotentials=pseudo_map,
+                    kmesh=kmesh_vals,
+                    mesh_cutoff_ry=float(mesh_cutoff_ry),
+                    dm_mixing_weight=float(dm_mixing_weight),
+                    dm_number_pulay=int(dm_number_pulay),
+                    electronic_temperature_k=float(electronic_temperature_k),
+                    max_scf_iterations=int(max_scf_iterations),
+                    spin_mode=str(spin_mode).strip().lower(),
+                )
+            )
+
+            copy_cmds = [
+                f"cp -f {shlex.quote(pseudo_dir.rstrip('/') + '/' + pp)} ."
+                for pp in sorted(set(pseudo_map.values()))
+            ]
+            job_name = f"fsb_{stamp[-6:]}_{idx:02d}"
+            script_cfg = PBSJobConfig(
+                job_name=job_name,
+                n_nodes=int(n_nodes),
+                n_cores_per_node=int(cores_per_node),
+                walltime=walltime,
+                queue=queue_used,
+                work_dir=case_remote_dir,
+                modules=cfg.modules,
+                env_vars={
+                    "OMP_NUM_THREADS": str(threads),
+                    "MKL_NUM_THREADS": str(threads),
+                    "OPENBLAS_NUM_THREADS": str(threads),
+                    "NUMEXPR_NUM_THREADS": str(threads),
+                },
+            )
+            run_cmd = f"mpirun -np {mpi_np} {shlex.quote(siesta_executable)} < {shlex.quote(fdf_name)} > {shlex.quote(out_name)}"
+            commands = [
+                "set -eo pipefail",
+                "mkdir -p logs",
+                *copy_cmds,
+                "start=$(date +%s)",
+                run_cmd,
+                "rc=$?",
+                "end=$(date +%s)",
+                'echo "$((end-start))" > elapsed_seconds.txt',
+                'echo "$rc" > exit_code.txt',
+                "exit $rc",
+            ]
+            script_text = generate_script(script_cfg, commands)
+            (case_local_dir / f"{job_name}.pbs").write_text(script_text)
+
+            jm.stage_files([fdf_path], case_remote_dir)
+            submitted = jm.submit(script_text, case_remote_dir, script_name=f"{job_name}.pbs")
+            click.echo(
+                click.style(
+                    f"[benchmark] submitted {case_name}: job_id={submitted['job_id']} queue={queue_used} "
+                    f"(mpi={mpi_np}, threads={threads})",
+                    fg="cyan",
+                )
+            )
+            submitted_cases.append(
+                {
+                    "name": case_name,
+                    "label": case_label,
+                    "job_name": job_name,
+                    "job_id": submitted["job_id"],
+                    "mpi_np": int(mpi_np),
+                    "threads": int(threads),
+                    "remote_dir": case_remote_dir,
+                    "local_dir": str(case_local_dir),
+                    "out_file": out_name,
+                    "times_file": times_name,
+                    "force_stress_file": "FORCE_STRESS",
+                }
+            )
+
+        pending = {c["job_id"]: c for c in submitted_cases}
+        last_seen_state: dict[str, str] = {}
+        t0 = time.time()
+        while pending:
+            if time.time() - t0 > float(timeout_seconds):
+                raise click.ClickException(
+                    f"Benchmark timed out after {timeout_seconds}s with pending jobs: "
+                    + ", ".join(str(v["job_id"]) for v in pending.values())
+                )
+            for job_id in list(pending.keys()):
+                case = pending[job_id]
+                details = jm.status_details(str(job_id))
+                state_sig = f"{details.get('status')}:{details.get('scheduler_state')}"
+                if last_seen_state.get(str(job_id)) != state_sig:
+                    last_seen_state[str(job_id)] = state_sig
+                    click.echo(
+                        f"[benchmark] job {job_id} ({case['name']}): "
+                        f"{details.get('status')} [{details.get('scheduler_state')}]"
+                    )
+
+                if not details.get("terminal"):
+                    continue
+
+                case["status"] = details.get("status")
+                case["scheduler_state"] = details.get("scheduler_state")
+                case["exit_code"] = details.get("exit_code")
+                case["status_source"] = details.get("source")
+                case_local_dir = Path(case["local_dir"])
+                try:
+                    jm.retrieve(
+                        case["remote_dir"],
+                        case_local_dir,
+                        [
+                            case["out_file"],
+                            case["force_stress_file"],
+                            case["times_file"],
+                            "elapsed_seconds.txt",
+                            "exit_code.txt",
+                            f"{case['job_name']}.log",
+                        ],
+                    )
+                except Exception as exc:
+                    case["error"] = f"retrieve_failed:{type(exc).__name__}:{exc}"
+                    del pending[job_id]
+                    continue
+
+                if details.get("status") != "COMPLETED":
+                    case["error"] = (
+                        f"terminal_status={details.get('status')} "
+                        f"scheduler_state={details.get('scheduler_state')} "
+                        f"exit_code={details.get('exit_code')}"
+                    )
+                    del pending[job_id]
+                    continue
+
+                out_path = case_local_dir / str(case["out_file"])
+                fs_path = case_local_dir / str(case["force_stress_file"])
+                times_path = case_local_dir / str(case["times_file"])
+                try:
+                    candidate = load_siesta_result(
+                        out_path,
+                        force_stress_path=fs_path if fs_path.exists() else None,
+                        times_path=times_path if times_path.exists() else None,
+                    )
+                    metrics = compare_force_stress(reference=reference, candidate=candidate)
+                    evaluation = evaluate_thresholds(metrics, thresholds)
+                    case["candidate"] = {
+                        "natoms": int(candidate["natoms"]),
+                        "total_energy_ev": float(candidate["total_energy_ev"]),
+                        "elapsed_seconds": float(candidate["elapsed_seconds"]),
+                        "out_path": str(out_path),
+                    }
+                    case["metrics"] = metrics
+                    case["evaluation"] = evaluation
+                except Exception as exc:
+                    case["error"] = f"postprocess_failed:{type(exc).__name__}:{exc}"
+
+                del pending[job_id]
+
+            if pending:
+                time.sleep(float(poll_interval))
+
+    poscar_hash = hashlib.md5(local_poscar.read_bytes()).hexdigest()
+    reference_summary = {
+        "outcar_path": str(local_outcar),
+        "poscar_path": str(local_poscar),
+        "poscar_md5": poscar_hash,
+        "natoms": int(reference["natoms"]),
+        "total_energy_ev": float(reference["total_energy_ev"]),
+        "elapsed_seconds": float(reference["elapsed_seconds"]),
+        "stress_kbar": list(reference["stress_kbar"].tolist() if hasattr(reference["stress_kbar"], "tolist") else reference["stress_kbar"]),
+    }
+
+    winner = choose_fastest_passing_case(submitted_cases)
+    summary_payload = {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "queue_used": queue_used,
+        "reference": reference_summary,
+        "thresholds": {
+            "force_mae_eva": float(thresholds.force_mae_eva),
+            "stress_mae_kbar": float(thresholds.stress_mae_kbar),
+            "energy_mev_per_atom": float(thresholds.energy_mev_per_atom),
+            "min_speedup": float(thresholds.min_speedup),
+        },
+        "cases": submitted_cases,
+        "winner": winner["name"] if winner else None,
+    }
+    summary_payload = to_serializable_payload(summary_payload)
+    js_path = run_root / "benchmark_force_stress_summary.json"
+    js_path.write_text(json.dumps(summary_payload, indent=2))
+
+    md_lines = [
+        "# wtec benchmark-force-stress",
+        "",
+        f"- generated_at: `{summary_payload['generated_at']}`",
+        f"- reference_outcar: `{reference_summary['outcar_path']}`",
+        f"- reference_poscar_md5: `{reference_summary['poscar_md5']}`",
+        f"- reference_elapsed_seconds: `{reference_summary['elapsed_seconds']}`",
+        "",
+        "## Thresholds",
+        f"- force_mae_eva <= {thresholds.force_mae_eva}",
+        f"- stress_mae_kbar <= {thresholds.stress_mae_kbar}",
+        f"- energy_mev_per_atom <= {thresholds.energy_mev_per_atom}",
+        f"- speedup_vs_reference >= {thresholds.min_speedup}",
+        "",
+        "## Cases",
+        "| case | job_id | mpi | threads | elapsed_s | speedup | force_mae | stress_mae | energy_meV/atom | pass |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|:---:|",
+    ]
+    for case in submitted_cases:
+        metrics = case.get("metrics", {})
+        cand = case.get("candidate", {})
+        evaluation = case.get("evaluation", {})
+        md_lines.append(
+            "| "
+            + f"{case.get('name')} | {case.get('job_id')} | {case.get('mpi_np')} | {case.get('threads')} | "
+            + f"{cand.get('elapsed_seconds', 'n/a')} | {metrics.get('speedup_vs_reference', 'n/a')} | "
+            + f"{metrics.get('force_mae_eva', 'n/a')} | {metrics.get('stress_mae_kbar', 'n/a')} | "
+            + f"{metrics.get('energy_mev_per_atom', 'n/a')} | "
+            + ("yes" if evaluation.get("pass", False) else "no")
+            + " |"
+        )
+        if case.get("error"):
+            md_lines.append(f"- `{case.get('name')}` error: `{case.get('error')}`")
+    md_lines.extend(["", f"## Winner", f"- {summary_payload['winner'] or 'none'}", ""])
+    md_path = run_root / "benchmark_force_stress_summary.md"
+    md_path.write_text("\n".join(md_lines))
+
+    click.echo(click.style(f"[benchmark] summary json: {js_path}", fg="green"))
+    click.echo(click.style(f"[benchmark] summary md: {md_path}", fg="green"))
+    if winner:
+        metrics = winner.get("metrics", {})
+        speed = float(metrics.get("speedup_vs_reference", 0.0))
+        f_mae = float(metrics.get("force_mae_eva", 0.0))
+        s_mae = float(metrics.get("stress_mae_kbar", 0.0))
+        click.echo(
+            click.style(
+                "[benchmark] winner="
+                f"{winner['name']} speedup={speed:.3f} "
+                f"force_mae={f_mae:.6f} "
+                f"stress_mae={s_mae:.6f}",
+                fg="green",
+                bold=True,
+            )
+        )
+    else:
+        click.echo(
+            click.style(
+                "[benchmark] no case met all thresholds; inspect summary for per-metric failures.",
+                fg="yellow",
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -320,9 +320,10 @@ class TopoSlabWorkflow:
     def _reference_atoms(self, fallback_atoms):
         ref_path = self._pes_reference_structure_path()
         if ref_path is None:
-            if self._dft_mode() == "dual_family":
+            if self._dft_mode() in {"dual_family", "hybrid_qe_ref_siesta_variants"}:
                 raise ValueError(
-                    "dual_family mode requires dft_pes_reference_structure_file for PES reference track."
+                    f"{self._dft_mode()} mode requires "
+                    "dft_pes_reference_structure_file for PES reference track."
                 )
             return fallback_atoms
         if not ref_path.exists():
@@ -651,10 +652,10 @@ class TopoSlabWorkflow:
                         if isinstance(siesta_cfg.get("factorization_defaults"), dict)
                         else {}
                     ),
-                    dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
-                    dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                    dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.18)),
+                    dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 6)),
                     electronic_temperature_k=float(siesta_cfg.get("electronic_temperature_k", 300.0)),
-                    max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                    max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 120)),
                     dispersion_cfg=self._dft_dispersion_cfg(),
                     **common_kwargs,
                 )
@@ -828,10 +829,10 @@ class TopoSlabWorkflow:
                         if isinstance(siesta_cfg.get("factorization_defaults"), dict)
                         else {}
                     ),
-                    dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
-                    dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                    dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.18)),
+                    dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 6)),
                     electronic_temperature_k=float(siesta_cfg.get("electronic_temperature_k", 300.0)),
-                    max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                    max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 120)),
                     dispersion_cfg=self._dft_dispersion_cfg(),
                     **common_kwargs,
                 )
@@ -966,8 +967,40 @@ class TopoSlabWorkflow:
 
         payload_name = "transport_payload.json"
         result_name = "transport_result.json"
+        progress_name = "transport_progress.jsonl"
+        cert_name = "transport_runtime_cert.json"
         payload_path = transport_dir / payload_name
         win_path = hr_dat.with_name(f"{self.cfg.get('material', 'material')}.win")
+        logging_cfg = self.cfg.get("logging", {})
+        if not isinstance(logging_cfg, dict):
+            logging_cfg = {}
+        runtime_log_detail = str(
+            self.cfg.get(
+                "runtime_logging_detail",
+                logging_cfg.get("detail", "per_ensemble"),
+            )
+        ).strip().lower() or "per_ensemble"
+        runtime_heartbeat = int(
+            self.cfg.get(
+                "runtime_logging_heartbeat_seconds",
+                logging_cfg.get("heartbeat_seconds", 20),
+            )
+        )
+        stream_from_start = bool(
+            self.cfg.get(
+                "runtime_stream_from_start",
+                logging_cfg.get("stream_from_start", True),
+            )
+        )
+        retrieve_on_failure = bool(
+            self.cfg.get(
+                "runtime_retrieve_on_failure",
+                logging_cfg.get("retrieve_on_failure", True),
+            )
+        )
+        require_mumps = bool(self.cfg.get("transport_require_mumps", True))
+        kwant_mode = str(self.cfg.get("transport_kwant_mode", "auto")).strip().lower() or "auto"
+        kwant_task_workers = int(self.cfg.get("transport_kwant_task_workers", 0))
         payload = {
             "hr_dat_path": hr_dat.name,
             "win_path": win_path.name if win_path.exists() else None,
@@ -986,11 +1019,17 @@ class TopoSlabWorkflow:
             "n_layers_y": int(self.cfg.get("transport_n_layers_y", 4)),
             "carrier_density_m3": self.cfg.get("carrier_density_m3"),
             "fermi_velocity_m_per_s": self.cfg.get("fermi_velocity_m_per_s"),
+            "progress_file": progress_name,
+            "runtime_cert_file": cert_name,
+            "logging_detail": runtime_log_detail,
+            "heartbeat_seconds": max(5, runtime_heartbeat),
+            "require_mumps": require_mumps,
+            "kwant_mode": kwant_mode,
+            "kwant_task_workers": max(0, kwant_task_workers),
         }
-        payload_path.write_text(json.dumps(payload, indent=2))
 
         worker_zip = self._worker_source_zip(transport_dir)
-        stage_files: list[Path] = [payload_path, worker_zip, hr_dat]
+        stage_files: list[Path] = [worker_zip, hr_dat]
         if win_path.exists():
             stage_files.append(win_path)
 
@@ -1013,265 +1052,66 @@ class TopoSlabWorkflow:
             cores_per_node = cfg.cores_for_queue(queue_used)
             n_nodes = int(self.cfg.get("n_nodes", 1))
             total_cores = max(1, n_nodes * cores_per_node)
-            raw_mpi_np = int(self.cfg.get("transport_mpi_np", 0))
-            raw_threads = int(self.cfg.get("transport_threads", 0))
-            autotune_meta: dict[str, Any] | None = None
-
-            autotune_cfg = self.cfg.get("transport_autotune", {})
-            if not isinstance(autotune_cfg, dict):
-                autotune_cfg = {}
-
-            def _resolve_profile(profile: dict[str, Any], *, total: int) -> tuple[int, int] | None:
-                try:
-                    mpi = max(1, int(profile.get("mpi_np", 1)))
-                except Exception:
-                    return None
-                raw_thr = profile.get("threads", "all")
-                if isinstance(raw_thr, str):
-                    s = raw_thr.strip().lower()
-                    if s in {"all", "max"}:
-                        thr = max(1, total // mpi)
-                    elif s in {"half", "1/2"}:
-                        thr = max(1, total // (2 * mpi))
-                    elif s in {"quarter", "1/4"}:
-                        thr = max(1, total // (4 * mpi))
-                    else:
-                        try:
-                            thr = int(s)
-                        except Exception:
-                            return None
-                else:
-                    try:
-                        thr = int(raw_thr)
-                    except Exception:
-                        return None
-                mpi = max(1, min(mpi, total))
-                thr = max(1, min(thr, total))
-                if mpi * thr > total:
-                    thr = max(1, total // mpi)
-                return mpi, thr
-
-            def _autotune_cache_path() -> Path:
-                raw = str(autotune_cfg.get("cache_file", "~/.wtec/transport_autotune.json")).strip()
-                return Path(raw).expanduser().resolve()
-
-            def _load_autotune_cache(path: Path) -> dict[str, Any]:
-                if not path.exists() or path.stat().st_size == 0:
-                    return {"entries": {}}
-                try:
-                    payload = json.loads(path.read_text())
-                except Exception:
-                    return {"entries": {}}
-                if not isinstance(payload, dict):
-                    return {"entries": {}}
-                entries = payload.get("entries")
-                if not isinstance(entries, dict):
-                    payload["entries"] = {}
-                return payload
-
-            def _save_autotune_cache(path: Path, payload: dict[str, Any]) -> None:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(payload, indent=2))
-
-            def _probe_walltime() -> str:
-                return str(autotune_cfg.get("benchmark_walltime", "00:08:00"))
-
-            autotune_enabled = bool(autotune_cfg.get("enabled", True))
-            autotune_scope = str(autotune_cfg.get("scope", "per_queue")).strip().lower() or "per_queue"
-            if autotune_scope != "per_queue":
-                autotune_scope = "per_queue"
-
-            # Avoid CPU oversubscription by default.
-            # Auto mode (0/0) favors thread-only parallelism for Kwant workloads.
-            if raw_mpi_np <= 0 and raw_threads <= 0:
+            enforce_1x64 = bool(self.cfg.get("transport_kwant_enforce_1x64", True))
+            if enforce_1x64:
+                if n_nodes != 1:
+                    raise RuntimeError(
+                        "transport_kwant_enforce_1x64 requires n_nodes=1. "
+                        f"Current n_nodes={n_nodes}."
+                    )
+                if total_cores < 64:
+                    raise RuntimeError(
+                        "transport_kwant_enforce_1x64 requires at least 64 allocated cores "
+                        f"(queue={queue_used}, nodes={n_nodes}, ppn={cores_per_node}, total={total_cores})."
+                    )
                 mpi_np = 1
-                threads = total_cores
-                if autotune_enabled:
-                    cache_path = _autotune_cache_path()
-                    cache_payload = _load_autotune_cache(cache_path)
-                    key = (
-                        f"{cfg.host}|{queue_used}|{self.cfg.get('material', '')}|"
-                        f"{self.cfg.get('transport_axis', 'x')}|{self.cfg.get('thickness_axis', 'z')}|"
-                        f"{int(self.cfg.get('transport_n_layers_y', 4))}|{total_cores}"
-                    )
-                    cached_entry = (
-                        cache_payload.get("entries", {}).get(key)
-                        if isinstance(cache_payload.get("entries"), dict)
-                        else None
-                    )
-                    if isinstance(cached_entry, dict):
-                        try:
-                            c_np = int(cached_entry.get("mpi_np", 1))
-                            c_th = int(cached_entry.get("threads", total_cores))
-                            if c_np > 0 and c_th > 0 and c_np * c_th <= total_cores:
-                                mpi_np, threads = c_np, c_th
-                                autotune_meta = {
-                                    "status": "cache_hit",
-                                    "scope": "per_queue",
-                                    "cache_key": key,
-                                    "mpi_np": mpi_np,
-                                    "threads": threads,
-                                    "cache_file": str(cache_path),
-                                }
-                        except Exception:
-                            pass
-
-                    if autotune_meta is None:
-                        raw_profiles = autotune_cfg.get("profiles")
-                        if not isinstance(raw_profiles, list) or not raw_profiles:
-                            raw_profiles = [
-                                {"mpi_np": 1, "threads": "all"},
-                                {"mpi_np": 2, "threads": "half"},
-                                {"mpi_np": 4, "threads": "quarter"},
-                            ]
-                        candidates: list[tuple[int, int]] = []
-                        for profile in raw_profiles:
-                            if not isinstance(profile, dict):
-                                continue
-                            resolved = _resolve_profile(profile, total=total_cores)
-                            if resolved is None:
-                                continue
-                            if resolved not in candidates:
-                                candidates.append(resolved)
-                        if not candidates:
-                            candidates = [(1, total_cores)]
-
-                        best_elapsed = None
-                        best_pair = None
-                        for p_np, p_th in candidates:
-                            probe_name = f"probe_np{p_np}_th{p_th}"
-                            probe_dir_local = transport_dir / "_autotune_probe" / probe_name
-                            probe_dir_local.mkdir(parents=True, exist_ok=True)
-                            probe_payload_name = "probe_payload.json"
-                            probe_result_name = "probe_result.json"
-                            thicknesses_cfg = self.cfg.get("thicknesses")
-                            if not isinstance(thicknesses_cfg, list) or not thicknesses_cfg:
-                                thicknesses_cfg = [3]
-                            mfp_lengths_cfg = self.cfg.get("mfp_lengths")
-                            if not isinstance(mfp_lengths_cfg, list) or not mfp_lengths_cfg:
-                                mfp_lengths_cfg = [3]
-                            probe_payload = {
-                                "hr_dat_path": hr_dat.name,
-                                "win_path": win_path.name if win_path.exists() else None,
-                                "thicknesses": [min(int(x) for x in thicknesses_cfg)],
-                                "disorder_strengths": [0.0],
-                                "n_ensemble": int(autotune_cfg.get("benchmark_n_ensemble", 1)),
-                                "energy": float(self.cfg.get("fermi_shift_eV", 0.0)),
-                                "n_jobs": 1,
-                                "mfp_n_layers_z": int(self.cfg.get("mfp_n_layers_z", 10)),
-                                "mfp_lengths": [min(int(x) for x in mfp_lengths_cfg)],
-                                "lead_onsite_eV": float(self.cfg.get("lead_onsite_eV", 0.0)),
-                                "base_seed": int(self.cfg.get("base_seed", 0)),
-                                "lead_axis": str(self.cfg.get("transport_axis", "x")),
-                                "thickness_axis": str(self.cfg.get("thickness_axis", "z")),
-                                "n_layers_x": int(self.cfg.get("transport_n_layers_x", 4)),
-                                "n_layers_y": int(self.cfg.get("transport_n_layers_y", 4)),
-                                "carrier_density_m3": self.cfg.get("carrier_density_m3"),
-                                "fermi_velocity_m_per_s": self.cfg.get("fermi_velocity_m_per_s"),
-                            }
-                            probe_payload_path = probe_dir_local / probe_payload_name
-                            probe_payload_path.write_text(json.dumps(probe_payload, indent=2))
-                            probe_stage_files: list[Path] = [probe_payload_path, worker_zip, hr_dat]
-                            if win_path.exists():
-                                probe_stage_files.append(win_path)
-                            probe_remote_dir = (
-                                f"{self._remote_run_base(cfg)}/transport/_autotune/"
-                                f"{str(label)}_{probe_name}"
-                            )
-                            probe_job_name = f"ta_{p_np}_{p_th}"[:15]
-                            probe_worker_python = (
-                                f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}"
-                            )
-                            probe_cmd = build_command(
-                                probe_worker_python,
-                                mpi=MPIConfig(n_cores=p_np, n_pool=1),
-                                extra_args=f"-m wtec.workflow.transport_worker {probe_payload_name} {probe_result_name}",
-                            )
-                            probe_cmd = self._thread_exports(probe_cmd, threads=p_th)
-                            probe_script = generate_script(
-                                PBSJobConfig(
-                                    job_name=probe_job_name,
-                                    n_nodes=n_nodes,
-                                    n_cores_per_node=cores_per_node,
-                                    walltime=_probe_walltime(),
-                                    queue=queue_used,
-                                    work_dir=probe_remote_dir,
-                                    modules=cfg.modules,
-                                    env_vars={},
-                                ),
-                                [probe_cmd],
-                            )
-                            t0 = time.time()
-                            try:
-                                jm.submit_and_wait(
-                                    probe_script,
-                                    remote_dir=probe_remote_dir,
-                                    local_dir=probe_dir_local,
-                                    retrieve_patterns=[probe_result_name, "*.log", "*.out"],
-                                    script_name=f"transport_autotune_{probe_name}.pbs",
-                                    stage_files=probe_stage_files,
-                                    expected_local_outputs=[probe_result_name],
-                                    queue_used=queue_used,
-                                    poll_interval=int(self.cfg.get("_runtime_log_poll_interval", 5)),
-                                    live_log=False,
-                                    stale_log_seconds=int(self.cfg.get("_runtime_stale_log_seconds", 300)),
-                                )
-                            except Exception:
-                                continue
-                            elapsed = float(time.time() - t0)
-                            if best_elapsed is None or elapsed < best_elapsed:
-                                best_elapsed = elapsed
-                                best_pair = (p_np, p_th)
-
-                        if best_pair is not None:
-                            mpi_np, threads = best_pair
-                            entries = cache_payload.get("entries")
-                            if not isinstance(entries, dict):
-                                entries = {}
-                                cache_payload["entries"] = entries
-                            entries[key] = {
-                                "mpi_np": mpi_np,
-                                "threads": threads,
-                                "queue": queue_used,
-                                "total_cores": total_cores,
-                                "updated_at": int(time.time()),
-                                "best_elapsed_sec": best_elapsed,
-                            }
-                            _save_autotune_cache(cache_path, cache_payload)
-                            autotune_meta = {
-                                "status": "benchmarked",
-                                "scope": "per_queue",
-                                "cache_key": key,
-                                "cache_file": str(cache_path),
-                                "mpi_np": mpi_np,
-                                "threads": threads,
-                                "best_elapsed_sec": best_elapsed,
-                            }
-                        else:
-                            autotune_meta = {
-                                "status": "fallback_no_successful_probe",
-                                "scope": "per_queue",
-                                "mpi_np": mpi_np,
-                                "threads": threads,
-                            }
-            elif raw_mpi_np <= 0:
-                threads = max(1, min(raw_threads, total_cores))
-                mpi_np = max(1, total_cores // threads)
-            elif raw_threads <= 0:
-                mpi_np = max(1, min(raw_mpi_np, total_cores))
-                threads = max(1, total_cores // mpi_np)
+                threads = 64
             else:
-                mpi_np = max(1, min(raw_mpi_np, total_cores))
-                threads = max(1, min(raw_threads, total_cores))
+                raw_mpi_np = int(self.cfg.get("transport_mpi_np", 0))
+                raw_threads = int(self.cfg.get("transport_threads", 0))
+                # Avoid CPU oversubscription by default.
+                # Auto mode (0/0): use one MPI rank and all available threads.
+                if raw_mpi_np <= 0 and raw_threads <= 0:
+                    mpi_np = 1
+                    threads = total_cores
+                elif raw_mpi_np <= 0:
+                    threads = max(1, min(raw_threads, total_cores))
+                    mpi_np = max(1, total_cores // threads)
+                elif raw_threads <= 0:
+                    mpi_np = max(1, min(raw_mpi_np, total_cores))
+                    threads = max(1, total_cores // mpi_np)
+                else:
+                    mpi_np = max(1, min(raw_mpi_np, total_cores))
+                    threads = max(1, min(raw_threads, total_cores))
 
-            if mpi_np * threads > total_cores:
-                threads = max(1, total_cores // mpi_np)
+                if mpi_np * threads > total_cores:
+                    threads = max(1, total_cores // mpi_np)
+
+            payload["expected_mpi_np"] = int(mpi_np)
+            payload["expected_threads"] = int(threads)
+            payload_path.write_text(json.dumps(payload, indent=2))
+            stage_files.insert(0, payload_path)
 
             print(
                 "[Orchestrator] Transport qsub resources: "
                 f"queue={queue_used}, nodes={n_nodes}, ppn={cores_per_node}, "
                 f"np={mpi_np}, threads={threads}"
             )
+            cert_payload = {
+                "queue": queue_used,
+                "n_nodes": int(n_nodes),
+                "ppn": int(cores_per_node),
+                "total_cores": int(total_cores),
+                "expected_mpi_np": int(mpi_np),
+                "expected_threads": int(threads),
+                "kwant_enforce_1x64": bool(enforce_1x64),
+                "require_mumps": bool(require_mumps),
+                "kwant_mode": kwant_mode,
+                "kwant_task_workers": int(max(0, kwant_task_workers)),
+                "runtime_logging_detail": runtime_log_detail,
+                "runtime_heartbeat_seconds": int(max(5, runtime_heartbeat)),
+            }
+            (transport_dir / cert_name).write_text(json.dumps(cert_payload, indent=2))
 
             worker_python = (
                 f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}"
@@ -1296,23 +1136,32 @@ class TopoSlabWorkflow:
                 ),
                 [cmd],
             )
+            local_script_path = transport_dir / f"transport_worker_{str(label)}.pbs"
+            local_script_path.write_text(script)
 
             meta = jm.submit_and_wait(
                 script,
                 remote_dir=remote_dir,
                 local_dir=transport_dir,
-                retrieve_patterns=[result_name, f"{job_name}.log", "*.out"],
-                    script_name=f"transport_worker_{str(label)}.pbs",
+                retrieve_patterns=[
+                    result_name,
+                    progress_name,
+                    cert_name,
+                    "wtec_job.log",
+                    f"{job_name}.log",
+                    "*.out",
+                ],
+                script_name=f"transport_worker_{str(label)}.pbs",
                 stage_files=stage_files,
                 expected_local_outputs=[result_name],
                 queue_used=queue_used,
                 poll_interval=int(self.cfg.get("_runtime_log_poll_interval", 5)),
                 live_log=bool(self.cfg.get("_runtime_live_log", True)),
-                live_files=[f"{job_name}.log", result_name],
+                live_files=["wtec_job.log", f"{job_name}.log", progress_name, result_name],
                 stale_log_seconds=int(self.cfg.get("_runtime_stale_log_seconds", 300)),
+                retrieve_on_failure=retrieve_on_failure,
+                stream_from_start=stream_from_start,
             )
-            if autotune_meta is not None:
-                meta["autotune"] = autotune_meta
 
         out_payload = json.loads((transport_dir / result_name).read_text())
         results = out_payload.get("transport_results", {})
@@ -1676,12 +1525,12 @@ class TopoSlabWorkflow:
                                 if isinstance(siesta_cfg.get("factorization_defaults"), dict)
                                 else {}
                             ),
-                            dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.10)),
-                            dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 8)),
+                            dm_mixing_weight=float(siesta_cfg.get("dm_mixing_weight", 0.18)),
+                            dm_number_pulay=int(siesta_cfg.get("dm_number_pulay", 6)),
                             electronic_temperature_k=float(
                                 siesta_cfg.get("electronic_temperature_k", 300.0)
                             ),
-                            max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 200)),
+                            max_scf_iterations=int(siesta_cfg.get("max_scf_iterations", 120)),
                             dispersion_cfg=self._dft_dispersion_cfg(),
                             **common_kwargs,
                         )

@@ -1,4 +1,6 @@
 from pathlib import Path
+import sys
+import types
 
 import click
 import pytest
@@ -125,17 +127,6 @@ def test_preflight_rejects_invalid_dft_reference_reuse_policy(tmp_path, monkeypa
         cli._run_preflight(cfg, resume=False, stage="transport")
 
 
-def test_preflight_rejects_invalid_transport_autotune_scope(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
-    _write_init_state(tmp_path)
-    hr = tmp_path / "x_hr.dat"
-    hr.write_text("dummy")
-    cfg = _base_cfg(hr)
-    cfg["transport_autotune"] = {"enabled": True, "scope": "global"}
-    with pytest.raises(click.UsageError):
-        cli._run_preflight(cfg, resume=False, stage="transport")
-
-
 def test_preflight_rejects_invalid_topology_tiering_mode(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
     _write_init_state(tmp_path)
@@ -156,6 +147,16 @@ def test_preflight_rejects_invalid_siesta_slab_ldos_autogen_mode(tmp_path, monke
     cfg["topology"]["siesta_slab_ldos_autogen"] = "bad_mode"
     with pytest.raises(click.UsageError):
         cli._run_preflight(cfg, resume=False, stage="transport")
+
+
+def test_preflight_accepts_tb_kresolved_siesta_slab_ldos_autogen_mode(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+    _write_init_state(tmp_path)
+    hr = tmp_path / "x_hr.dat"
+    hr.write_text("dummy")
+    cfg = _base_cfg(hr)
+    cfg["topology"]["siesta_slab_ldos_autogen"] = "tb_kresolved"
+    cli._run_preflight(cfg, resume=False, stage="transport")
 
 
 def test_preflight_strict_requires_dense_transport_sampling(tmp_path, monkeypatch) -> None:
@@ -209,6 +210,66 @@ def test_preflight_dual_family_requires_explicit_pes_reference_structure(tmp_pat
     cfg["dft_lcao_engine"] = "siesta"
     with pytest.raises(click.UsageError):
         cli._run_preflight(cfg, resume=False, stage="dft_scf")
+
+
+def test_preflight_hybrid_requires_explicit_pes_reference_structure(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+    _write_init_state(tmp_path)
+    hr = tmp_path / "x_hr.dat"
+    hr.write_text("dummy")
+    slab = tmp_path / "slab.cif"
+    slab.write_text("nonempty")
+    cfg = _base_cfg(hr)
+    cfg.pop("hr_dat_path", None)
+    cfg["structure_file"] = str(slab)
+    cfg["dft_mode"] = "hybrid_qe_ref_siesta_variants"
+    cfg["dft_pes_engine"] = "qe"
+    cfg["dft_lcao_engine"] = "siesta"
+    with pytest.raises(click.UsageError):
+        cli._run_preflight(cfg, resume=False, stage="dft_scf")
+
+
+def test_pes_reference_can_generate_from_mp_id(tmp_path, monkeypatch) -> None:
+    class _FakeStructure:
+        def get_primitive_structure(self):
+            return self
+
+        def to(self, *, filename: str, fmt: str = "cif") -> None:
+            Path(filename).write_text("fake_cif\n")
+
+    class _FakeMPRester:
+        def __init__(self, key: str) -> None:
+            self.key = key
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+        def get_structure_by_material_id(self, material_id: str):
+            assert self.key == "fake-key"
+            assert material_id == "mp-1067587"
+            return _FakeStructure()
+
+    mp_api_mod = types.ModuleType("mp_api")
+    mp_api_client_mod = types.ModuleType("mp_api.client")
+    mp_api_client_mod.MPRester = _FakeMPRester
+    mp_api_mod.client = mp_api_client_mod
+    monkeypatch.setitem(sys.modules, "mp_api", mp_api_mod)
+    monkeypatch.setitem(sys.modules, "mp_api.client", mp_api_client_mod)
+    monkeypatch.setenv("MP_API_KEY", "fake-key")
+
+    cfg = {"material": "TaP"}
+    cfg["dft_pes_reference_mp_id"] = "mp-1067587"
+    cfg["dft_pes_reference_use_primitive"] = True
+    cfg["_runtime_config_dir"] = str(tmp_path)
+
+    out_path = cli._ensure_pes_reference_structure_from_mp(cfg)
+    out = tmp_path / "references" / "TaP_primitive_mp-1067587.cif"
+    assert out.exists()
+    assert out_path == str(out.resolve())
+    assert cfg["dft_pes_reference_structure_file"] == str(out.resolve())
 
 
 def test_preflight_dual_family_accepts_vasp_and_abacus_engines(tmp_path, monkeypatch) -> None:

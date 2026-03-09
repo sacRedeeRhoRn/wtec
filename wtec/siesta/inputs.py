@@ -29,10 +29,10 @@ class SiestaInputGenerator:
         dispersion_method: str = "d3",
         siesta_dftd3_use_xc_defaults: bool = True,
         include_pao_basis: bool = True,
-        dm_mixing_weight: float = 0.10,
-        dm_number_pulay: int = 8,
+        dm_mixing_weight: float = 0.18,
+        dm_number_pulay: int = 6,
         electronic_temperature_k: float = 300.0,
-        max_scf_iterations: int = 200,
+        max_scf_iterations: int = 120,
     ) -> None:
         self.atoms = atoms
         self.material_name = str(material_name)
@@ -100,6 +100,8 @@ class SiestaInputGenerator:
             f"DM.NumberPulay    {self.dm_number_pulay}",
             f"ElectronicTemperature  {self.electronic_temperature_k:g} K",
             "Spin              spin-orbit" if self.spin_orbit else "Spin              non-polarized",
+            "Diag.ParallelOverK   true",
+            "Diag.Use2D           false",
             "",
             "%block kgrid_Monkhorst_Pack",
             f"{kpts[0]}   0   0   0.0",

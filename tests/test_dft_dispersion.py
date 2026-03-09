@@ -127,6 +127,29 @@ def test_siesta_pipeline_resolves_queue_scoped_factorization_defaults(tmp_path) 
     assert omp_threads == 2
 
 
+def test_siesta_pipeline_uses_balanced_scf_auto_parallel_defaults(tmp_path) -> None:
+    class DummyJM:
+        def resolve_queue(self, queue, fallback_order=None):  # noqa: ANN001, ANN002
+            return "g3"
+
+    pipe = SiestaPipeline(
+        _si_atom(),
+        "CoSi",
+        DummyJM(),
+        run_dir=tmp_path,
+        remote_base="/remote",
+        n_nodes=1,
+        n_cores_per_node=32,
+        n_cores_by_queue={"g3": 32},
+    )
+    scf_np, scf_thr = pipe._resolve_stage_parallel("scf")
+    nscf_np, nscf_thr = pipe._resolve_stage_parallel("nscf")
+    assert scf_np == 16
+    assert scf_thr == 2
+    assert nscf_np == 32
+    assert nscf_thr == 1
+
+
 def test_dft_pipeline_run_scf_returns_meta(tmp_path) -> None:
     class DummyJM:
         def submit_and_wait(self, *args, **kwargs):  # noqa: ANN002, ANN003

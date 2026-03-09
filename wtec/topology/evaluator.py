@@ -175,6 +175,8 @@ def evaluate_topology_point(
                 else None
             ),
             allow_proxy_fallback=bool(task.get("arc_allow_proxy_fallback", False)),
+            kmesh_xy=tuple(int(v) for v in task.get("arc_kmesh_xy", [8, 8])),
+            broadening_ev=float(task.get("arc_broadening_ev", 0.06)),
         )
     else:
         arc = {

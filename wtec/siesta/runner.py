@@ -13,7 +13,10 @@ from wtec.cluster.pbs import PBSJobConfig, generate_script
 from wtec.config.materials import get_material
 from wtec.siesta.inputs import SiestaInputGenerator
 from wtec.siesta.wannier_bridge import prepare_wannier_bridge
-from wtec.wannier.convergence import assert_wannier_converged
+from wtec.wannier.convergence import (
+    assert_wannier_converged,
+    assert_wannier_topology_from_files,
+)
 from wtec.wannier.inputs import generate_win
 
 
@@ -49,10 +52,10 @@ class SiestaPipeline:
         omp_threads_nscf: int = 0,
         omp_threads_wannier: int = 0,
         factorization_defaults: dict[str, Any] | None = None,
-        dm_mixing_weight: float = 0.10,
-        dm_number_pulay: int = 8,
+        dm_mixing_weight: float = 0.18,
+        dm_number_pulay: int = 6,
         electronic_temperature_k: float = 300.0,
-        max_scf_iterations: int = 200,
+        max_scf_iterations: int = 120,
         dispersion_cfg: dict[str, Any] | None = None,
         walltime_scf: str = "12:00:00",
         walltime_nscf: str = "12:00:00",
@@ -310,6 +313,11 @@ class SiestaPipeline:
             wout_path=self.run_dir / f"{self.material}.wout",
             win_path=win,
         )
+        assert_wannier_topology_from_files(
+            hr_dat_path=self.run_dir / f"{self.material}_hr.dat",
+            win_path=win,
+            material_class=getattr(self.preset, "material_class", "generic"),
+        )
         meta["bridge"] = bridge_info
         return meta
 
@@ -447,7 +455,18 @@ class SiestaPipeline:
             if scoped_np is not None:
                 mpi_np = int(scoped_np)
         if mpi_np <= 0:
-            mpi_np = total_alloc
+            # Balanced default for SCF: split node into 2 OMP threads per rank.
+            # This is typically faster than pure-MPI for large LCAO defect/slab cells.
+            if (
+                st == "scf"
+                and omp_thr <= 0
+                and (self.omp_threads is None or int(self.omp_threads) <= 0)
+                and total_alloc >= 2
+            ):
+                mpi_np = max(1, total_alloc // 2)
+                omp_thr = 2
+            else:
+                mpi_np = total_alloc
         if mpi_np > total_alloc:
             raise ValueError(
                 f"SIESTA {st} mpi_np={mpi_np} exceeds allocated cores={total_alloc} "
