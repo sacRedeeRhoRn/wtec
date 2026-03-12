@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 import json
 from threading import Event
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from wtec.cli import (
     _append_nanowire_benchmark_trace,
@@ -243,9 +245,10 @@ def test_run_kwant_and_rgf_overlap_runs_rgf_while_kwant_waits() -> None:
     allow_kwant_finish = Event()
     call_order: list[str] = []
 
-    def _submit_kwant_reference():
+    def _submit_kwant_reference(cancel_event=None):
         call_order.append("kwant_started")
         kwant_started.set()
+        assert cancel_event is not None
         assert allow_kwant_finish.wait(timeout=2.0)
         call_order.append("kwant_finished")
         return {"results": []}, {"status": "kwant"}
@@ -266,6 +269,35 @@ def test_run_kwant_and_rgf_overlap_runs_rgf_while_kwant_waits() -> None:
     assert kwant_job == {"status": "kwant"}
     assert rgf_rows == [{"thickness_uc": 1}]
     assert rgf_jobs == [{"status": "rgf"}]
+
+
+def test_run_kwant_and_rgf_overlap_cancels_kwant_when_rgf_raises() -> None:
+    kwant_started = Event()
+    kwant_cancelled = Event()
+    call_order: list[str] = []
+
+    def _submit_kwant_reference(cancel_event=None):
+        call_order.append("kwant_started")
+        kwant_started.set()
+        assert cancel_event is not None
+        assert cancel_event.wait(timeout=2.0)
+        call_order.append("kwant_cancelled")
+        kwant_cancelled.set()
+        raise CancelledError("kwant cancelled")
+
+    def _run_rgf_axis():
+        assert kwant_started.wait(timeout=2.0)
+        call_order.append("rgf_failed")
+        raise RuntimeError("rgf boom")
+
+    with pytest.raises(RuntimeError, match="rgf boom"):
+        _run_kwant_and_rgf_overlap(
+            submit_kwant_reference=_submit_kwant_reference,
+            run_rgf_axis=_run_rgf_axis,
+        )
+
+    assert kwant_cancelled.is_set()
+    assert call_order == ["kwant_started", "rgf_failed", "kwant_cancelled"]
 
 
 def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(

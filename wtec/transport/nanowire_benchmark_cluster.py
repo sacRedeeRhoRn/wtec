@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
 import json
 import os
 from pathlib import Path
@@ -53,6 +54,7 @@ def submit_kwant_nanowire_reference(
     live_log: bool = True,
     poll_interval: int = 5,
     stale_log_seconds: int = 300,
+    cancel_event=None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     cfg = ClusterConfig.from_env()
     benchmark_path = Path(benchmark_dir).expanduser().resolve()
@@ -80,6 +82,9 @@ def submit_kwant_nanowire_reference(
         ],
     }
     payload_path.write_text(json.dumps(payload, indent=2))
+
+    if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
+        raise CancelledError("Kwant reference launch cancelled before submission.")
 
     path_tail = "_".join(benchmark_path.parts[-3:])
     remote_dir = f"{cfg.remote_workdir.rstrip('/')}/nanowire_benchmark/{spec.mp_id}/{path_tail}"
@@ -124,22 +129,28 @@ def submit_kwant_nanowire_reference(
             [cmd],
         )
         script_path.write_text(script)
-        meta = jm.submit_and_wait(
-            script,
-            remote_dir=remote_dir,
-            local_dir=benchmark_path,
-            retrieve_patterns=[result_path.name, "*.out", "wtec_job.log"],
-            script_name=script_path.name,
-            stage_files=[payload_path, worker_zip, Path(canonical_input.hr_dat_path)],
-            expected_local_outputs=[result_path.name],
-            queue_used=queue_used,
-            poll_interval=int(poll_interval),
-            verbose=True,
-            live_log=bool(live_log),
-            live_files=[result_path.name, "wtec_job.log"],
-            stale_log_seconds=int(stale_log_seconds),
-            retrieve_on_failure=True,
-            stream_from_start=True,
-        )
+        try:
+            meta = jm.submit_and_wait(
+                script,
+                remote_dir=remote_dir,
+                local_dir=benchmark_path,
+                retrieve_patterns=[result_path.name, "*.out", "wtec_job.log"],
+                script_name=script_path.name,
+                stage_files=[payload_path, worker_zip, Path(canonical_input.hr_dat_path)],
+                expected_local_outputs=[result_path.name],
+                queue_used=queue_used,
+                poll_interval=int(poll_interval),
+                verbose=True,
+                live_log=bool(live_log),
+                live_files=[result_path.name, "wtec_job.log"],
+                stale_log_seconds=int(stale_log_seconds),
+                retrieve_on_failure=True,
+                stream_from_start=True,
+                cancel_event=cancel_event,
+            )
+        except RuntimeError as exc:
+            if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
+                raise CancelledError("Kwant reference job cancelled.") from exc
+            raise
     result = json.loads(result_path.read_text())
     return result, meta

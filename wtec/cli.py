@@ -8442,9 +8442,20 @@ def _run_kwant_and_rgf_overlap(
     submit_kwant_reference,
     run_rgf_axis,
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    from concurrent.futures import CancelledError
+    from threading import Event
+    import contextlib
+
+    cancel_kwant = Event()
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nanowire-kwant") as executor:
-        kwant_future = executor.submit(submit_kwant_reference)
-        rgf_rows, rgf_jobs = run_rgf_axis()
+        kwant_future = executor.submit(submit_kwant_reference, cancel_event=cancel_kwant)
+        try:
+            rgf_rows, rgf_jobs = run_rgf_axis()
+        except Exception:
+            cancel_kwant.set()
+            with contextlib.suppress(CancelledError, RuntimeError):
+                kwant_future.result()
+            raise
         kwant_result, kwant_job = kwant_future.result()
     return kwant_result, kwant_job, rgf_rows, rgf_jobs
 
@@ -8726,7 +8737,7 @@ def benchmark_transport(
                         )
                     )
                     kwant_result, kwant_job, rgf_rows, rgf_jobs = _run_kwant_and_rgf_overlap(
-                        submit_kwant_reference=lambda: submit_kwant_nanowire_reference(
+                        submit_kwant_reference=lambda cancel_event=None: submit_kwant_nanowire_reference(
                             canonical_input=canonical,
                             benchmark_dir=kwant_benchmark_dir,
                             spec=spec,
@@ -8741,6 +8752,7 @@ def benchmark_transport(
                             live_log=False,
                             poll_interval=log_poll_interval,
                             stale_log_seconds=stale_log_seconds,
+                            cancel_event=cancel_event,
                         ),
                         run_rgf_axis=lambda: _run_rgf_benchmark_axis(
                             source_cfg=source_cfg,

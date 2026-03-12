@@ -237,6 +237,53 @@ class JobManager:
                 "Install/build MPI-enabled binaries or set TOPOSLAB_SKIP_MPI_BINARY_CHECK=1 to override."
             )
 
+    def ensure_remote_python_imports(
+        self,
+        python_executable: str,
+        modules_to_import: list[str],
+        *,
+        modules: list[str] | None = None,
+        bin_dirs: list[str] | None = None,
+    ) -> None:
+        """Fail if the remote Python cannot import the requested modules."""
+        resolved_bin_dirs = list(bin_dirs or [])
+        if not resolved_bin_dirs:
+            raw = os.environ.get("TOPOSLAB_CLUSTER_BIN_DIRS", "").strip()
+            if raw:
+                resolved_bin_dirs = [p.strip() for p in raw.split(",") if p.strip()]
+        module_prefix = (
+            " && ".join(
+                f"module load {shlex.quote(m)} >/dev/null 2>&1" for m in modules
+            )
+            if modules
+            else ""
+        )
+        path_prefix = (
+            "export PATH="
+            + ":".join(shlex.quote(p) for p in resolved_bin_dirs)
+            + ":$PATH"
+            if resolved_bin_dirs
+            else ""
+        )
+        module_list = [str(m).strip() for m in modules_to_import if str(m).strip()]
+        if not module_list:
+            return
+        check = (
+            f"{shlex.quote(python_executable)} -c "
+            + shlex.quote(
+                "import importlib; "
+                f"[importlib.import_module(m) for m in {module_list!r}]"
+            )
+        )
+        parts = [p for p in [module_prefix, path_prefix, check] if p]
+        wrapped = " && ".join(parts)
+        rc, _, stderr = self._ssh.run(f"bash -lc {shlex.quote(wrapped)}", check=False)
+        if rc != 0:
+            raise RuntimeError(
+                f"Remote Python import check failed for {python_executable!r} "
+                f"modules {module_list}: {stderr.strip() or 'unknown error'}"
+            )
+
     def _status_from_sacct(self, job_id: str) -> dict | None:
         """Return status details from sacct, or None when unavailable."""
         rc, stdout, _ = self._ssh.run(
@@ -432,6 +479,7 @@ class JobManager:
         live_files: list[str] | None = None,
         stale_log_seconds: int = 300,
         stream_from_start: bool = False,
+        cancel_event=None,
     ) -> dict:
         """Block until job reaches a terminal state.
 
@@ -452,6 +500,7 @@ class JobManager:
         last_log_growth = time.time()
         log_offsets: dict[str, int | None] = {}
         log_paths: list[str] = []
+        cancel_requested = False
         if live_log and live_remote_dir and live_files:
             for name in live_files:
                 if not name:
@@ -486,6 +535,17 @@ class JobManager:
                 print(
                     f"  Job {job_id}: {s} [{state}] via {src} ({elapsed}s elapsed)"
                 )
+            if (
+                cancel_event is not None
+                and hasattr(cancel_event, "is_set")
+                and cancel_event.is_set()
+                and not details.get("terminal")
+                and not cancel_requested
+            ):
+                cancel_requested = True
+                self._ssh.run(f"qdel {shlex.quote(job_id)} 2>/dev/null", check=False)
+                if verbose:
+                    print(f"  Cancel requested for job {job_id}; issued qdel")
             if (
                 live_log
                 and s == "RUNNING"
@@ -539,6 +599,7 @@ class JobManager:
         stale_log_seconds: int = 300,
         retrieve_on_failure: bool = False,
         stream_from_start: bool = False,
+        cancel_event=None,
     ) -> dict:
         """Submit job, wait for completion, retrieve files.
 
@@ -565,6 +626,7 @@ class JobManager:
             live_files=live_files,
             stale_log_seconds=stale_log_seconds,
             stream_from_start=stream_from_start,
+            cancel_event=cancel_event,
         )
         final_status = final_details["status"]
 
