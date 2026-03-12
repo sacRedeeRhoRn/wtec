@@ -8183,6 +8183,54 @@ def _load_benchmark_source_resume(benchmark_root: Path) -> tuple[Path, Path, flo
     return hr_path, win_path, float(fermi_ev)
 
 
+def _build_nanowire_benchmark_source_seed(
+    *,
+    base_cfg: dict[str, Any],
+    benchmark_root: Path,
+    material: str,
+    default_mp_id: str,
+) -> dict[str, Any]:
+    return {
+        "_runtime_config_dir": str(benchmark_root),
+        "mp_api_key": str(base_cfg.get("mp_api_key", "")).strip(),
+        "mp_api_key_env": str(base_cfg.get("mp_api_key_env", "MP_API_KEY")).strip() or "MP_API_KEY",
+        "material": str(base_cfg.get("material", material)).strip() or str(material),
+        "dft_pes_reference_structure_file": str(
+            base_cfg.get("dft_pes_reference_structure_file", "")
+        ).strip(),
+        "dft_pes_reference_mp_id": str(
+            base_cfg.get("dft_pes_reference_mp_id", default_mp_id)
+        ).strip()
+        or str(default_mp_id),
+        "dft_pes_reference_use_primitive": bool(
+            base_cfg.get("dft_pes_reference_use_primitive", True)
+        ),
+    }
+
+
+def _resolve_nanowire_benchmark_source_structure(
+    *,
+    base_cfg: dict[str, Any],
+    benchmark_root: Path,
+    selected_models: tuple[Any, ...],
+    material: str,
+    default_mp_id: str,
+) -> str:
+    needs_source_structure = any(
+        _load_benchmark_source_resume(benchmark_root / model.key) is None
+        for model in selected_models
+    )
+    if not needs_source_structure:
+        return ""
+    source_cfg_seed = _build_nanowire_benchmark_source_seed(
+        base_cfg=base_cfg,
+        benchmark_root=benchmark_root,
+        material=material,
+        default_mp_id=default_mp_id,
+    )
+    return _ensure_pes_reference_structure_from_mp(source_cfg_seed)
+
+
 def _run_rgf_benchmark_axis(
     *,
     source_cfg: dict[str, Any],
@@ -8353,17 +8401,23 @@ def benchmark_transport(
     spec = NanowireBenchmarkSpec()
     selected_models = select_benchmark_models(spec, include_supplementary=bool(all_models))
     transport_nodes = max(1, int(base_cfg.get("n_nodes", 1) or 1))
-
-    source_cfg_seed = {
-        "_runtime_config_dir": str(benchmark_root),
-        "mp_api_key": str(base_cfg.get("mp_api_key", "")).strip(),
-        "mp_api_key_env": str(base_cfg.get("mp_api_key_env", "MP_API_KEY")).strip() or "MP_API_KEY",
-        "material": spec.material,
-        "dft_pes_reference_mp_id": spec.mp_id,
-        "dft_pes_reference_use_primitive": True,
-    }
-    structure_file = _ensure_pes_reference_structure_from_mp(source_cfg_seed)
-    click.echo(click.style(f"[benchmark] source structure: {structure_file}", fg="cyan"))
+    structure_file = _resolve_nanowire_benchmark_source_structure(
+        base_cfg=base_cfg,
+        benchmark_root=benchmark_root,
+        selected_models=selected_models,
+        material=spec.material,
+        default_mp_id=spec.mp_id,
+    )
+    source_cfg_seed = _build_nanowire_benchmark_source_seed(
+        base_cfg=base_cfg,
+        benchmark_root=benchmark_root,
+        material=spec.material,
+        default_mp_id=spec.mp_id,
+    )
+    if structure_file:
+        click.echo(click.style(f"[benchmark] source structure: {structure_file}", fg="cyan"))
+    else:
+        click.echo(click.style("[benchmark] source structure: reusing existing source artifacts", fg="cyan"))
     click.echo(
         click.style(
             "[benchmark] models: "
@@ -8431,6 +8485,9 @@ def benchmark_transport(
                 )
             )
         else:
+            if not structure_file:
+                structure_file = _ensure_pes_reference_structure_from_mp(source_cfg_seed)
+                click.echo(click.style(f"[benchmark] source structure: {structure_file}", fg="cyan"))
             source_checkpoint = _checkpoint_file_for_cfg(source_cfg)
             if source_checkpoint.exists():
                 source_checkpoint.unlink()

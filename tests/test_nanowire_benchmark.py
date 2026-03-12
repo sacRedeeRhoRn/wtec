@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
 from threading import Event
 from pathlib import Path
 
 import numpy as np
 
-from wtec.cli import _build_tis_benchmark_source_cfg, _run_kwant_and_rgf_overlap
+from wtec.cli import (
+    _build_nanowire_benchmark_source_seed,
+    _build_tis_benchmark_source_cfg,
+    _resolve_nanowire_benchmark_source_structure,
+    _run_kwant_and_rgf_overlap,
+)
 from wtec.config.materials import get_material
 from wtec.qe.lcao import get_projections
 from wtec.transport.nanowire_benchmark import (
@@ -84,6 +90,62 @@ def test_build_tis_benchmark_source_cfg_uses_explicit_source_nodes(tmp_path: Pat
     assert cfg["n_nodes"] == 2
     assert cfg["run_dir"].endswith("bench/source_run")
     assert cfg["transport_backend"] == "qsub"
+
+
+def test_build_nanowire_benchmark_source_seed_preserves_local_pes_reference(tmp_path: Path) -> None:
+    cfg = _build_nanowire_benchmark_source_seed(
+        base_cfg={
+            "material": "OverrideTiS",
+            "mp_api_key_env": "ALT_MP",
+            "dft_pes_reference_mp_id": "mp-local",
+            "dft_pes_reference_structure_file": str(tmp_path / "TiS_local.cif"),
+            "dft_pes_reference_use_primitive": False,
+        },
+        benchmark_root=tmp_path / "bench",
+        material="TiS",
+        default_mp_id="mp-1018028",
+    )
+    assert cfg["material"] == "OverrideTiS"
+    assert cfg["mp_api_key_env"] == "ALT_MP"
+    assert cfg["dft_pes_reference_mp_id"] == "mp-local"
+    assert cfg["dft_pes_reference_structure_file"].endswith("TiS_local.cif")
+    assert cfg["dft_pes_reference_use_primitive"] is False
+
+
+def test_resolve_nanowire_benchmark_source_structure_skips_mp_when_source_artifacts_exist(
+    tmp_path: Path, monkeypatch
+) -> None:
+    model_root = tmp_path / "bench" / "model_b"
+    hr_path = tmp_path / "TiS_hr.dat"
+    win_path = tmp_path / "TiS.win"
+    hr_path.write_text("dummy", encoding="utf-8")
+    win_path.write_text("dummy", encoding="utf-8")
+    (model_root / "source_artifacts.json").parent.mkdir(parents=True, exist_ok=True)
+    (model_root / "source_artifacts.json").write_text(
+        json.dumps(
+            {
+                "hr_dat": str(hr_path),
+                "win_path": str(win_path),
+                "fermi_ev": 1.23,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _boom(_: dict) -> str:
+        raise AssertionError("MP-backed structure resolution should be skipped when source artifacts already exist")
+
+    monkeypatch.setattr("wtec.cli._ensure_pes_reference_structure_from_mp", _boom)
+    spec = NanowireBenchmarkSpec()
+    selected_models = select_benchmark_models(spec)
+    resolved = _resolve_nanowire_benchmark_source_structure(
+        base_cfg={},
+        benchmark_root=tmp_path / "bench",
+        selected_models=selected_models,
+        material=spec.material,
+        default_mp_id=spec.mp_id,
+    )
+    assert resolved == ""
 
 
 def test_run_kwant_and_rgf_overlap_runs_rgf_while_kwant_waits() -> None:
