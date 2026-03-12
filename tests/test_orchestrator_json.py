@@ -22,6 +22,18 @@ def test_orchestrator_jsonable_converts_numpy_payloads() -> None:
     }
 
 
+def test_thread_exports_uses_relaxed_binding_for_single_rank_threading() -> None:
+    cmd = TopoSlabWorkflow._thread_exports(
+        "mpirun -np 1 demo.x",
+        threads=64,
+        full_node_threading=True,
+    )
+    assert "OMP_NUM_THREADS=64" in cmd
+    assert "OMP_PLACES=threads" in cmd
+    assert "OMPI_MCA_hwloc_base_binding_policy=none" in cmd
+    assert "I_MPI_PIN=0" in cmd
+
+
 def test_transport_stage_routes_to_kwant_qsub(tmp_path, monkeypatch) -> None:
     cfg = {
         "name": "demo",
@@ -452,6 +464,10 @@ def test_stage_transport_rgf_qsub_writes_standard_transport_payload(tmp_path, mo
     assert written["runtime_cert"]["numerical_status"] == "phase1_ready"
     assert written["runtime_cert"]["parallel_policy"] == "throughput"
     assert written["runtime_cert"]["omp_threads"] == 6
+    attempt_dir = Path(meta["attempt_dir"])
+    assert attempt_dir.is_dir()
+    assert (attempt_dir / "transport_payload.json").exists()
+    assert (attempt_dir / "transport_rgf_raw.json").exists()
 
 
 def test_stage_transport_rgf_qsub_canonicalizes_axes_and_uses_single_point_threads(tmp_path, monkeypatch) -> None:
@@ -620,6 +636,10 @@ def test_stage_transport_rgf_qsub_canonicalizes_axes_and_uses_single_point_threa
     written = json.loads((Path(cfg["run_dir"]) / "transport" / "primary" / "transport_result.json").read_text())
     assert written["runtime_cert"]["parallel_policy"] == "single_point"
     assert written["runtime_cert"]["omp_threads"] == 32
+    attempt_dir = Path(meta["attempt_dir"])
+    assert attempt_dir.is_dir()
+    assert (attempt_dir / "transport_result.json").exists()
+    assert (attempt_dir / "transport_runtime_cert.json").exists()
 
 
 def test_stage_transport_rgf_qsub_caps_single_point_threads_without_threaded_backend(tmp_path, monkeypatch) -> None:
@@ -787,3 +807,6 @@ def test_stage_transport_rgf_qsub_caps_single_point_threads_without_threaded_bac
     assert written["runtime_cert"]["parallel_policy"] == "single_point"
     assert written["runtime_cert"]["omp_threads"] == 1
     assert written["runtime_cert"]["threaded_single_point_backend"] is False
+    attempt_dir = Path(meta["attempt_dir"])
+    assert attempt_dir.is_dir()
+    assert (attempt_dir / "transport_payload.json").exists()

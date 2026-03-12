@@ -22,6 +22,38 @@ static int omp_get_max_threads(void) { return 1; }
 #define WTEC_RGF_BUILD_BLAS_BACKEND "none"
 #endif
 
+#if defined(WTEC_RGF_USE_LAPACK)
+extern void zgemm_(
+    const char *transa,
+    const char *transb,
+    const int *m,
+    const int *n,
+    const int *k,
+    const double complex *alpha,
+    const double complex *a,
+    const int *lda,
+    const double complex *b,
+    const int *ldb,
+    const double complex *beta,
+    double complex *c,
+    const int *ldc);
+extern void zgetrf_(
+    const int *m,
+    const int *n,
+    double complex *a,
+    const int *lda,
+    int *ipiv,
+    int *info);
+extern void zgetri_(
+    const int *n,
+    double complex *a,
+    const int *lda,
+    const int *ipiv,
+    double complex *work,
+    const int *lwork,
+    int *info);
+#endif
+
 #define WTEC_RGF_MAX_PATH 4096
 #define WTEC_RGF_JSON_EPS 1.0e-12
 #define WTEC_RGF_SANCHO_MAX_ITER 256
@@ -157,6 +189,14 @@ static const char *wtec_point_kind_name(int point_kind) {
 
 static const char *wtec_json_bool(int value) {
   return value ? "true" : "false";
+}
+
+static int wtec_blas_linalg_enabled(void) {
+#if defined(WTEC_RGF_USE_LAPACK)
+  return 1;
+#else
+  return 0;
+#endif
 }
 
 static int wtec_effective_ensemble_count(double disorder_strength, int n_ensemble) {
@@ -1074,6 +1114,24 @@ static void wtec_mat_conj_transpose(const double complex *a, int rows, int cols,
 
 static void wtec_mat_mul(const double complex *a, int m, int k, const double complex *b, int n, double complex *c) {
   int i, j, t;
+#if defined(WTEC_RGF_USE_LAPACK)
+  {
+    const char trans = 'N';
+    const int cm = n;
+    const int cn = m;
+    const int ck = k;
+    const int lda = n;
+    const int ldb = k;
+    const int ldc = n;
+    const double complex alpha = 1.0 + 0.0 * I;
+    const double complex beta = 0.0 + 0.0 * I;
+    if (m <= 0 || n <= 0 || k <= 0) {
+      return;
+    }
+    zgemm_(&trans, &trans, &cm, &cn, &ck, &alpha, b, &lda, a, &ldb, &beta, c, &ldc);
+    return;
+  }
+#endif
   memset(c, 0, (size_t)m * (size_t)n * sizeof(double complex));
 #if defined(_OPENMP)
 #pragma omp parallel for private(j, t) schedule(static) if ((m * n * k) >= 32768)
@@ -1116,6 +1174,34 @@ static double wtec_mat_norm_fro(const double complex *a, int n) {
 
 static int wtec_mat_inverse(const double complex *a, int n, double complex *out) {
   int i, j, k, pivot_row;
+#if defined(WTEC_RGF_USE_LAPACK)
+  int info = 0;
+  int lwork = -1;
+  int *ipiv = NULL;
+  double complex work_query = 0.0 + 0.0 * I;
+  double complex *work = NULL;
+  if (n <= 0 || a == NULL || out == NULL) {
+    return -1;
+  }
+  memcpy(out, a, (size_t)n * (size_t)n * sizeof(double complex));
+  ipiv = (int *)wtec_calloc((size_t)n, sizeof(int));
+  zgetrf_(&n, &n, out, &n, ipiv, &info);
+  if (info != 0) {
+    free(ipiv);
+    return -1;
+  }
+  zgetri_(&n, out, &n, ipiv, &work_query, &lwork, &info);
+  if (info != 0) {
+    free(ipiv);
+    return -1;
+  }
+  lwork = (int)llround(fmax(1.0, creal(work_query)));
+  work = (double complex *)wtec_calloc((size_t)lwork, sizeof(double complex));
+  zgetri_(&n, out, &n, ipiv, work, &lwork, &info);
+  free(work);
+  free(ipiv);
+  return (info == 0) ? 0 : -1;
+#else
   double complex *aug = wtec_mat_alloc(n, 2 * n);
 #if defined(_OPENMP)
 #pragma omp parallel for private(j) schedule(static) if (n >= 32)
@@ -1181,6 +1267,7 @@ static int wtec_mat_inverse(const double complex *a, int n, double complex *out)
   }
   free(aug);
   return 0;
+#endif
 }
 
 static void wtec_build_resolvent(const double complex *h, int n, double complex z, double complex *out) {
@@ -1442,9 +1529,7 @@ static int wtec_surface_green_sancho(
     wtec_mat_mul(term2, n, n, beta, n, next_b);
     memcpy(alpha, next_a, (size_t)n * (size_t)n * sizeof(double complex));
     memcpy(beta, next_b, (size_t)n * (size_t)n * sizeof(double complex));
-    if ((iter == 0) || (((iter + 1) % 4) == 0)) {
-      wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
-    }
+    wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
     if (wtec_mat_norm_fro(alpha, n * n) + wtec_mat_norm_fro(beta, n * n) < WTEC_RGF_SANCHO_TOL) {
       converged = 1;
       wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
@@ -2554,6 +2639,7 @@ static int wtec_write_result_file(
   fprintf(fh, "    \"mpi_size\": %d,\n", mpi_size);
   fprintf(fh, "    \"omp_threads\": %d,\n", omp_get_max_threads());
   fprintf(fh, "    \"blas_backend\": \"%s\",\n", WTEC_RGF_BUILD_BLAS_BACKEND);
+  fprintf(fh, "    \"blas_linalg_enabled\": %s,\n", wtec_json_bool(wtec_blas_linalg_enabled()));
   fprintf(fh, "    \"n_orb\": %d,\n", n_orb);
   fprintf(fh, "    \"n_disorder\": %d,\n", payload->n_disorder);
   fprintf(fh, "    \"n_ensemble\": %d,\n", payload->n_ensemble);
@@ -2563,7 +2649,7 @@ static int wtec_write_result_file(
   fprintf(fh, "    \"safe_rank_cap\": %d,\n", mpi_size);
   fprintf(
       fh,
-      "    \"build_env\": {\"openmp_enabled\": %s, \"omp_max_threads\": %d, \"blas_backend\": \"%s\"},\n",
+      "    \"build_env\": {\"openmp_enabled\": %s, \"omp_max_threads\": %d, \"blas_backend\": \"%s\", \"blas_linalg_enabled\": %s},\n",
       wtec_json_bool(
 #ifdef _OPENMP
           1
@@ -2572,7 +2658,8 @@ static int wtec_write_result_file(
 #endif
           ),
       omp_get_max_threads(),
-      WTEC_RGF_BUILD_BLAS_BACKEND);
+      WTEC_RGF_BUILD_BLAS_BACKEND,
+      wtec_json_bool(wtec_blas_linalg_enabled()));
   fprintf(fh, "    \"transport_task_count\": %d\n", transport_task_count);
   fprintf(fh, "  }\n");
   fprintf(fh, "}\n");
@@ -2586,11 +2673,13 @@ static void wtec_rgf_emit_probe_json(int rank, int size) {
       "\"ready\":true,\"mpi_enabled\":true,\"rank\":%d,\"size\":%d,"
       "\"numerical_status\":\"phase2_experimental\","
       "\"blas_backend\":\"%s\","
-      "\"build_env\":{\"openmp_enabled\":%s,\"omp_max_threads\":%d,\"blas_backend\":\"%s\"}}\n",
+      "\"blas_linalg_enabled\":%s,"
+      "\"build_env\":{\"openmp_enabled\":%s,\"omp_max_threads\":%d,\"blas_backend\":\"%s\",\"blas_linalg_enabled\":%s}}\n",
       WTEC_RGF_BINARY_ID,
       rank,
       size,
       WTEC_RGF_BUILD_BLAS_BACKEND,
+      wtec_json_bool(wtec_blas_linalg_enabled()),
       wtec_json_bool(
 #ifdef _OPENMP
           1
@@ -2599,7 +2688,8 @@ static void wtec_rgf_emit_probe_json(int rank, int size) {
 #endif
           ),
       omp_get_max_threads(),
-      WTEC_RGF_BUILD_BLAS_BACKEND);
+      WTEC_RGF_BUILD_BLAS_BACKEND,
+      wtec_json_bool(wtec_blas_linalg_enabled()));
   fflush(stdout);
 }
 

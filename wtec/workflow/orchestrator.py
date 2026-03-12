@@ -9,6 +9,7 @@ from collections import Counter
 import hashlib
 import json
 import os
+import shutil
 import time
 from pathlib import Path
 import shlex
@@ -1622,6 +1623,18 @@ class TopoSlabWorkflow:
                 retrieve_on_failure=retrieve_on_failure,
                 stream_from_start=stream_from_start,
             )
+        attempt_dir = self._archive_transport_attempt(
+            transport_dir,
+            attempt_key=str((meta or {}).get("job_id") or int(time.time())),
+            files=[
+                payload_path,
+                local_script_path,
+                raw_result_path,
+                transport_dir / progress_name,
+                transport_dir / "wtec_job.log",
+                transport_dir / f"{job_name}.log",
+            ],
+        )
 
         raw_payload, runtime_cert = load_rgf_raw_result(raw_result_path)
         runtime_cert = dict(runtime_cert)
@@ -1700,6 +1713,12 @@ class TopoSlabWorkflow:
                 indent=2,
             )
         )
+        shutil.copy2(cert_path, attempt_dir / cert_path.name)
+        shutil.copy2(final_result_path, attempt_dir / final_result_path.name)
+        if isinstance(meta, dict):
+            meta["attempt_dir"] = str(attempt_dir)
+        if isinstance(meta_payload, dict):
+            meta_payload["rgf_attempt_dir"] = str(attempt_dir)
         return self._normalize_transport_results(results), meta
 
     @staticmethod
@@ -1715,14 +1734,42 @@ class TopoSlabWorkflow:
             f"export MKL_NUM_THREADS={t}; "
             f"export OPENBLAS_NUM_THREADS={t}; "
             f"export NUMEXPR_NUM_THREADS={t}; "
-            f"export OMP_PROC_BIND=spread; "
-            f"export OMP_PLACES=cores; "
         )
         if full_node_threading:
             # Single-rank threaded jobs should see the full PBS cpuset instead of
             # inheriting MPI rank pinning to a single socket/core subset.
-            exports += "export I_MPI_PIN=0; "
+            exports += (
+                "export OMP_PROC_BIND=spread; "
+                "export OMP_PLACES=threads; "
+                "export I_MPI_PIN=0; "
+                "export OMPI_MCA_hwloc_base_binding_policy=none; "
+                "export PRTE_MCA_hwloc_base_binding_policy=none; "
+            )
+        else:
+            exports += "export OMP_PROC_BIND=spread; export OMP_PLACES=cores; "
         return exports + command
+
+    @staticmethod
+    def _archive_transport_attempt(
+        transport_dir: Path,
+        *,
+        attempt_key: str,
+        files: list[Path],
+    ) -> Path:
+        safe_key = "".join(
+            ch if (ch.isalnum() or ch in {"-", "_"}) else "_"
+            for ch in (attempt_key or "attempt")
+        ) or "attempt"
+        attempts_dir = transport_dir / "attempts"
+        attempts_dir.mkdir(parents=True, exist_ok=True)
+        attempt_dir = attempts_dir / f"job_{safe_key}"
+        if attempt_dir.exists():
+            attempt_dir = attempts_dir / f"job_{safe_key}_{int(time.time())}"
+        attempt_dir.mkdir(parents=True, exist_ok=True)
+        for src in files:
+            if src.exists() and src.is_file():
+                shutil.copy2(src, attempt_dir / src.name)
+        return attempt_dir
 
     @staticmethod
     def _normalize_transport_results(results: dict) -> dict:

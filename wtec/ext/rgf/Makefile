@@ -19,8 +19,19 @@ endif
 
 BLAS_BACKEND ?= none
 CPPFLAGS += -DWTEC_RGF_BUILD_BLAS_BACKEND=\"$(BLAS_BACKEND)\"
+BLAS_LDFLAGS :=
+ifneq ($(filter $(BLAS_BACKEND),mkl openblas),)
+CPPFLAGS += -DWTEC_RGF_USE_LAPACK=1
+endif
+ifeq ($(BLAS_BACKEND),mkl)
+BLAS_LDFLAGS += -lmkl_rt -lpthread -ldl
+endif
+ifeq ($(BLAS_BACKEND),openblas)
+BLAS_LDFLAGS += -lopenblas
+endif
 CFLAGS ?= -O2 -std=c99 -Wall -Wextra -Iinclude $(CPPFLAGS) $(OPENMP_FLAGS)
-LDFLAGS ?= -lm $(OPENMP_FLAGS)
+LDFLAGS ?= -lm
+LDFLAGS += $(OPENMP_FLAGS) $(BLAS_LDFLAGS)
 
 SRC := $(wildcard src/*.c)
 OBJ := $(patsubst src/%.c,build/%.o,$(SRC))

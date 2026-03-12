@@ -14,6 +14,12 @@ if(OpenMP_C_FOUND)
 endif()
 target_compile_features(wtec_rgf_runner PRIVATE c_std_99)
 set(WTEC_RGF_BLAS_BACKEND "none" CACHE STRING "Reported BLAS backend for probe metadata")
+if(NOT WTEC_RGF_BLAS_BACKEND STREQUAL "none")
+  find_package(BLAS REQUIRED)
+  find_package(LAPACK REQUIRED)
+  target_link_libraries(wtec_rgf_runner PRIVATE BLAS::BLAS LAPACK::LAPACK)
+  target_compile_definitions(wtec_rgf_runner PRIVATE WTEC_RGF_USE_LAPACK=1)
+endif()
 target_compile_definitions(
   wtec_rgf_runner
   PRIVATE
