@@ -4,6 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
+from wtec.cli import _build_tis_benchmark_source_cfg
 from wtec.config.materials import get_material
 from wtec.qe.lcao import get_projections
 from wtec.transport.nanowire_benchmark import (
@@ -63,6 +64,25 @@ def test_select_benchmark_models_defaults_to_primary_rgf_model() -> None:
     assert [model.key for model in primary] == ["model_b"]
     all_models = select_benchmark_models(spec, include_supplementary=True)
     assert [model.key for model in all_models] == ["model_a", "model_b"]
+
+
+def test_build_tis_benchmark_source_cfg_uses_explicit_source_nodes(tmp_path: Path) -> None:
+    structure = tmp_path / "TiS.cif"
+    structure.write_text("data\n", encoding="utf-8")
+    cfg = _build_tis_benchmark_source_cfg(
+        base_cfg={"n_nodes": 1, "kpoints_scf": [1, 1, 1], "kpoints_nscf": [1, 1, 1]},
+        benchmark_root=tmp_path / "bench",
+        structure_file=str(structure),
+        source_name="nanowire_benchmark_source_model_b",
+        custom_projections=["Ti:d", "S:p"],
+        source_n_nodes=2,
+        live_log=True,
+        log_poll_interval=5,
+        stale_log_seconds=300,
+    )
+    assert cfg["n_nodes"] == 2
+    assert cfg["run_dir"].endswith("bench/source_run")
+    assert cfg["transport_backend"] == "qsub"
 
 
 def test_axis_permutation_maps_expected_axes() -> None:

@@ -8093,6 +8093,7 @@ def _build_tis_benchmark_source_cfg(
     structure_file: str,
     source_name: str,
     custom_projections: list[str] | None,
+    source_n_nodes: int,
     live_log: bool,
     log_poll_interval: int,
     stale_log_seconds: int,
@@ -8115,6 +8116,7 @@ def _build_tis_benchmark_source_cfg(
     cfg["material"] = NANOWIRE_BENCHMARK_MATERIAL
     cfg["run_profile"] = "smoke"
     cfg["run_dir"] = str((benchmark_root / "source_run").resolve())
+    cfg["n_nodes"] = max(1, int(source_n_nodes))
     cfg["structure_file"] = str(Path(structure_file).expanduser().resolve())
     cfg["dft_mode"] = "legacy_single"
     cfg["dft_engine"] = "qe"
@@ -8209,6 +8211,13 @@ def _load_benchmark_source_resume(benchmark_root: Path) -> tuple[Path, Path, flo
     help="Warn if a benchmark job is RUNNING but logs do not grow for this long.",
 )
 @click.option(
+    "--source-nodes",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Nodes reserved for the QE/Wannier source build before the fair transport benchmark stage.",
+)
+@click.option(
     "--all-models/--primary-model-only",
     "all_models",
     default=False,
@@ -8222,6 +8231,7 @@ def benchmark_transport(
     live_log: bool,
     log_poll_interval: int,
     stale_log_seconds: int,
+    source_nodes: int,
     all_models: bool,
 ) -> None:
     """Generate and validate the TiS mp-1018028 nanowire transport benchmark."""
@@ -8253,6 +8263,8 @@ def benchmark_transport(
         raise click.UsageError("--log-poll-interval must be > 0")
     if stale_log_seconds <= 0:
         raise click.UsageError("--stale-log-seconds must be > 0")
+    if source_nodes <= 0:
+        raise click.UsageError("--source-nodes must be > 0")
 
     if queue:
         _apply_env_updates_to_process({"TOPOSLAB_PBS_QUEUE": str(queue).strip()})
@@ -8261,6 +8273,7 @@ def benchmark_transport(
     benchmark_root.mkdir(parents=True, exist_ok=True)
     spec = NanowireBenchmarkSpec()
     selected_models = select_benchmark_models(spec, include_supplementary=bool(all_models))
+    transport_nodes = max(1, int(base_cfg.get("n_nodes", 1) or 1))
 
     source_cfg_seed = {
         "_runtime_config_dir": str(benchmark_root),
@@ -8279,12 +8292,20 @@ def benchmark_transport(
             fg="cyan",
         )
     )
+    click.echo(
+        click.style(
+            f"[benchmark] source_n_nodes={int(source_nodes)} transport_n_nodes={int(transport_nodes)}",
+            fg="cyan",
+        )
+    )
 
     summary: dict[str, Any] = {
         "mp_id": spec.mp_id,
         "material": spec.material,
         "model_scope": "all" if all_models else "primary_only",
         "selected_model_keys": [str(model.key) for model in selected_models],
+        "source_n_nodes": int(source_nodes),
+        "transport_n_nodes": int(transport_nodes),
         "article_protocol": {
             "transport_axis_crystal": "[001]",
             "surface_of_interest": "(010)",
@@ -8316,6 +8337,7 @@ def benchmark_transport(
             structure_file=structure_file,
             source_name=f"nanowire_benchmark_source_{model.key}_{spec.mp_id}",
             custom_projections=list(model.custom_projections),
+            source_n_nodes=int(source_nodes),
             live_log=live_log,
             log_poll_interval=log_poll_interval,
             stale_log_seconds=stale_log_seconds,
@@ -8426,6 +8448,7 @@ def benchmark_transport(
                     fermi_ev=fermi_ev_f,
                     length_uc=length_uc,
                     queue_override=queue,
+                    n_nodes=int(transport_nodes),
                     walltime=walltime,
                     python_executable=source_python,
                     live_log=live_log,
@@ -8509,6 +8532,7 @@ def benchmark_transport(
                         rgf_cfg["thickness_axis"] = "z"
                         rgf_cfg["transport_n_layers_x"] = int(length_uc)
                         rgf_cfg["transport_n_layers_y"] = int(spec.fixed_width_uc)
+                        rgf_cfg["n_nodes"] = int(transport_nodes)
                         rgf_cfg["reuse_transport_results"] = False
                         rgf_cfg["transport_strict_qsub"] = True
                         rgf_cfg["_runtime_live_log"] = bool(live_log)
