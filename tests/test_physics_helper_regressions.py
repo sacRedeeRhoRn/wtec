@@ -2,7 +2,11 @@ import numpy as np
 import pytest
 
 from wtec.topology.node_scan import compute_weyl_velocity_tensor
-from wtec.topology.surface_gf import _build_surface_hk
+from wtec.topology.surface_gf import (
+    _build_surface_hk,
+    lopez_sancho_surface_gf,
+    surface_spectral_map_lopez_sancho,
+)
 from wtec.topology.wilson_loop import compute_wilson_loop_chern
 from wtec.transport.observables import (
     fuchs_sondheimer_rho,
@@ -45,6 +49,38 @@ class _LinearWeylModel:
         )
 
 
+class _DoubleQWZModel:
+    def __init__(self, mass: float = -1.0) -> None:
+        self.mass = float(mass)
+        self.lattice_vectors = np.eye(3, dtype=float)
+
+    def hamiltonian_at_k(self, k_frac: np.ndarray) -> np.ndarray:
+        kx, ky, _ = np.asarray(k_frac, dtype=float)
+        x = 2.0 * np.pi * float(kx)
+        y = 2.0 * np.pi * float(ky)
+        dz = self.mass + np.cos(x) + np.cos(y)
+        h_block = (
+            np.sin(x) * _SIGMA_X
+            + np.sin(y) * _SIGMA_Y
+            + dz * _SIGMA_Z
+        )
+        out = np.zeros((4, 4), dtype=complex)
+        out[:2, :2] = h_block
+        out[2:, 2:] = h_block
+        return out
+
+
+def _left_surface_fixed_point(T_01: np.ndarray, z: complex, *, tol: float = 1.0e-12) -> np.ndarray:
+    eye = np.eye(T_01.shape[0], dtype=complex)
+    g = np.linalg.inv(z * eye)
+    for _ in range(4000):
+        g_next = np.linalg.inv(z * eye - T_01 @ g @ T_01.conj().T)
+        if np.max(np.abs(g_next - g)) < tol:
+            return g_next
+        g = g_next
+    raise AssertionError("fixed-point surface GF did not converge")
+
+
 def test_fuchs_sondheimer_exact_keeps_thick_film_tail() -> None:
     rho_bulk = 1.0
     mfp_m = 1.0
@@ -73,6 +109,22 @@ def test_wilson_loop_chern_uses_full_ky_slice_and_periodic_closure() -> None:
     chern_profile = np.asarray(result["chern_profile"], dtype=float)
     assert np.all(np.abs(np.abs(chern_profile) - 1.0) < 0.2)
     assert abs(abs(float(result["chern_integrated"])) - 1.0) < 0.2
+
+
+def test_wilson_loop_berry_comparison_uses_same_multiband_subspace() -> None:
+    result = compute_wilson_loop_chern(
+        _DoubleQWZModel(mass=-1.0),
+        n_kz=4,
+        n_kx=20,
+        n_ky=20,
+        n_occ_bands=2,
+    )
+
+    chern_profile = np.asarray(result["chern_profile"], dtype=float)
+    chern_profile_berry = np.asarray(result["chern_profile_berry"], dtype=float)
+    assert result["status"] == "ok"
+    assert np.all(np.abs(chern_profile - chern_profile_berry) < 0.2)
+    assert np.all(np.abs(np.abs(chern_profile_berry) - 2.0) < 0.2)
 
 
 def test_weyl_velocity_tensor_converts_fractional_k_to_ev_angstrom() -> None:
@@ -105,3 +157,52 @@ def test_surface_gf_builds_principal_layer_for_longer_range_hopping() -> None:
     assert T_01.shape == (2, 2)
     assert np.allclose(H_00, np.zeros((2, 2), dtype=complex))
     assert np.allclose(T_01, np.eye(2, dtype=complex))
+
+
+def test_lopez_sancho_surface_update_uses_left_surface_order() -> None:
+    T_01 = np.array([[0.0, 1.0], [2.0, 0.0]], dtype=complex)
+    G_surf, converged = lopez_sancho_surface_gf(
+        [
+            (0, 0, 1, T_01),
+            (0, 0, -1, T_01.conj().T),
+        ],
+        n_orb=2,
+        kx=0.0,
+        ky=0.0,
+        energy=0.3,
+        eta=0.2,
+        max_iter=500,
+        conv_tol=1.0e-12,
+    )
+
+    expected = _left_surface_fixed_point(T_01, 0.3 + 0.2j)
+    assert converged
+    assert np.allclose(G_surf, expected, atol=1.0e-9, rtol=1.0e-9)
+
+
+def test_surface_spectral_map_traces_full_surface_principal_layer() -> None:
+    hoppings = [
+        (0, 0, 2, np.array([[1.0 + 0.0j]], dtype=complex)),
+        (0, 0, -2, np.array([[1.0 + 0.0j]], dtype=complex)),
+    ]
+    G_surf, converged = lopez_sancho_surface_gf(
+        hoppings,
+        n_orb=1,
+        kx=0.0,
+        ky=0.0,
+        energy=0.1,
+        eta=0.05,
+    )
+    spectral_map, conv_map = surface_spectral_map_lopez_sancho(
+        hoppings,
+        n_orb=1,
+        energy=0.1,
+        eta=0.05,
+        kx_coords=np.asarray([0.0], dtype=float),
+        ky_coords=np.asarray([0.0], dtype=float),
+    )
+
+    expected_weight = float(-np.trace(G_surf).imag / np.pi)
+    assert converged
+    assert bool(conv_map[0, 0])
+    assert spectral_map[0, 0] == pytest.approx(expected_weight, rel=1.0e-10, abs=1.0e-10)

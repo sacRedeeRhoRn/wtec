@@ -72,3 +72,36 @@ def test_wannier90_restart_script_uses_threaded_single_rank_layout() -> None:
     assert "pw2wannier90.x" not in script
     assert "-pp TiS" not in script
     assert "mpirun -np 1 --bind-to none wannier90.x TiS" in script or "mpirun -np 1 --bind-to none wannier90.x  TiS" in script
+
+
+def test_wannier90_script_keeps_multinode_final_step_mpi_distributed() -> None:
+    script = wannier90_script(
+        "TiS",
+        work_dir="/tmp/demo",
+        n_nodes=2,
+        n_cores_per_node=64,
+        queue="g4",
+    )
+    assert "#PBS -l select=2:ncpus=64:mpiprocs=64:ompthreads=1" in script
+    assert "OMP_NUM_THREADS=128" not in script
+    assert "mpirun -np 1 --bind-to none wannier90.x TiS" not in script
+    assert "mpirun -np 1 --bind-to none wannier90.x  TiS" not in script
+    assert "env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 mpirun -np 128 --bind-to core wannier90.x TiS" in script or "env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 mpirun -np 128 --bind-to core wannier90.x  TiS" in script
+
+
+def test_wannier90_restart_script_keeps_multinode_layout_mpi_distributed() -> None:
+    script = wannier90_script(
+        "TiS",
+        work_dir="/tmp/demo",
+        n_nodes=2,
+        n_cores_per_node=64,
+        queue="g4",
+        restart_only=True,
+    )
+    assert "#PBS -l select=2:ncpus=64:mpiprocs=64:ompthreads=1" in script
+    assert "OMP_NUM_THREADS=128" not in script
+    assert "pw2wannier90.x" not in script
+    assert "-pp TiS" not in script
+    assert "mpirun -np 1 --bind-to none wannier90.x TiS" not in script
+    assert "mpirun -np 1 --bind-to none wannier90.x  TiS" not in script
+    assert "env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 mpirun -np 128 --bind-to core wannier90.x TiS" in script or "env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 mpirun -np 128 --bind-to core wannier90.x  TiS" in script

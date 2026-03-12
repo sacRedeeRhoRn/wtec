@@ -13,7 +13,8 @@ to the semi-infinite surface self-energy.
 The surface spectral function is:
     A_surf(k_∥; E) = -(1/π) Im Tr G_00^R(E; k_∥)
 
-where G_00^R is the (0,0) block of the surface Green's function matrix.
+where G_00^R is the full surface principal-layer block of the Green's function
+matrix.
 
 Advantages over finite-slab diagonalisation:
 - No size-quantisation artefacts (true semi-infinite limit)
@@ -117,7 +118,7 @@ def lopez_sancho_surface_gf(
 
     Returns
     -------
-    G_surf : (n_orb, n_orb) complex surface GF
+    G_surf : (n_orb * p_eff, n_orb * p_eff) complex surface principal-layer GF
     converged : bool
     """
     H_00, T_01 = _build_surface_hk(hoppings, n_orb, kx, ky)
@@ -139,12 +140,13 @@ def lopez_sancho_surface_gf(
         except np.linalg.LinAlgError:
             break
 
-        # Update effective hoppings
-        tg = t_backward @ g @ t_forward
-        gt = t_forward @ g @ t_backward
+        # Left-surface Dyson update: Σ_surf = T_01 g T_10. The bulk block gets
+        # both orientations because it couples to layers on either side.
+        surf_update = t_forward @ g @ t_backward
+        bulk_update = t_backward @ g @ t_forward
 
-        epsilon_s = epsilon_s + tg
-        epsilon_bulk = epsilon_bulk + tg + gt
+        epsilon_s = epsilon_s + surf_update
+        epsilon_bulk = epsilon_bulk + surf_update + bulk_update
         t_forward = t_forward @ g @ t_forward
         t_backward = t_backward @ g @ t_backward
 
@@ -158,7 +160,7 @@ def lopez_sancho_surface_gf(
     try:
         G_surf = np.linalg.solve(surf_inv, eye)
     except np.linalg.LinAlgError:
-        G_surf = np.zeros((n_orb, n_orb), dtype=complex)
+        G_surf = np.zeros_like(H_00)
         converged = False
 
     return G_surf, converged
@@ -202,8 +204,9 @@ def surface_spectral_map_lopez_sancho(
                 max_iter=max_iter,
                 conv_tol=conv_tol,
             )
-            # A = -(1/π) Im Tr G
-            spectral_map[ix, iy] = float(-np.trace(G[:n_orb, :n_orb]).imag / np.pi)
+            # G already is the full surface principal-layer block, so the
+            # spectral weight must include every orbital in that block.
+            spectral_map[ix, iy] = float(-np.trace(G).imag / np.pi)
             converged_map[ix, iy] = bool(conv)
 
     # Clip to non-negative (numerical noise can give tiny negatives)

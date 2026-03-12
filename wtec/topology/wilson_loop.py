@@ -51,6 +51,74 @@ def _overlap_matrix(evecs1: np.ndarray, evecs2: np.ndarray) -> np.ndarray:
     return evecs2.conj().T @ evecs1
 
 
+def _normalized_link_det(evecs_from: np.ndarray, evecs_to: np.ndarray) -> complex:
+    """Gauge-invariant U(1) link from an occupied subspace overlap."""
+    det = np.linalg.det(evecs_from.conj().T @ evecs_to)
+    mag = abs(det)
+    if mag < 1e-15:
+        return 1.0 + 0.0j
+    return det / mag
+
+
+def _berry_plaquette_phase_subspace(
+    tb_model,
+    k0: np.ndarray,
+    dk1: np.ndarray,
+    dk2: np.ndarray,
+    band_indices: list[int],
+) -> float:
+    """Berry plaquette phase for an occupied-band subspace."""
+    k00 = np.mod(np.asarray(k0, dtype=float), 1.0)
+    k10 = np.mod(k00 + np.asarray(dk1, dtype=float), 1.0)
+    k11 = np.mod(k00 + np.asarray(dk1, dtype=float) + np.asarray(dk2, dtype=float), 1.0)
+    k01 = np.mod(k00 + np.asarray(dk2, dtype=float), 1.0)
+
+    def _subspace(kp: np.ndarray) -> np.ndarray:
+        _, vecs = np.linalg.eigh(tb_model.hamiltonian_at_k(kp))
+        return vecs[:, band_indices]
+
+    u00 = _subspace(k00)
+    u10 = _subspace(k10)
+    u11 = _subspace(k11)
+    u01 = _subspace(k01)
+    phase = (
+        _normalized_link_det(u00, u10)
+        * _normalized_link_det(u10, u11)
+        * _normalized_link_det(u11, u01)
+        * _normalized_link_det(u01, u00)
+    )
+    return float(np.angle(phase))
+
+
+def _chern_profile_berry_subspace(
+    tb_model,
+    *,
+    kz_vals: np.ndarray,
+    n_kxy: int,
+    band_indices: list[int],
+) -> list[float]:
+    """Berry-plaquette C(k_z) profile for the same occupied subspace."""
+    nkxy = max(4, int(n_kxy))
+    dk = 1.0 / nkxy
+    dk_vec1 = np.array([dk, 0.0, 0.0], dtype=float)
+    dk_vec2 = np.array([0.0, dk, 0.0], dtype=float)
+    chern_vals: list[float] = []
+    for kz in kz_vals:
+        total_flux = 0.0
+        for ix in range(nkxy):
+            for iy in range(nkxy):
+                kxy = np.array([ix * dk, iy * dk, float(kz)], dtype=float)
+                total_flux += _berry_plaquette_phase_subspace(
+                    tb_model,
+                    kxy,
+                    dk_vec1,
+                    dk_vec2,
+                    band_indices=band_indices,
+                )
+        chern_vals.append(float(total_flux / (2.0 * np.pi)))
+    return chern_vals
+
+
 def _wilson_loop_matrix(
     tb_model,
     ky: float,
@@ -278,16 +346,15 @@ def compute_wilson_loop_chern(
         jump_kz.append(float(kz_mid))
         jump_chirality.append(int(np.sign(delta_c)))
 
-    # Also compute Berry-plaquette C(k_z) for comparison
-    from wtec.topology.node_scan import compute_chern_profile
+    # Also compute Berry-plaquette C(k_z) for comparison on the same occupied
+    # subspace, rather than collapsing the comparison to one band.
     try:
-        chern_bp = compute_chern_profile(
+        chern_profile_berry = _chern_profile_berry_subspace(
             tb_model,
-            n_kz=n_kz,
+            kz_vals=kz_vals,
             n_kxy=max(10, n_kx // 2),
-            band_idx=band_indices[-1] if band_indices else None,
+            band_indices=band_indices,
         )
-        chern_profile_berry = chern_bp.get("chern", [])
     except Exception:
         chern_profile_berry = []
 

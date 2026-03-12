@@ -162,9 +162,11 @@ def wannier90_script(
     # Step-specific layout:
     # - wannier90.x -pp is cheap and effectively serial
     # - pw2wannier90.x parallelizes over k-point pools, not OpenMP threads
-    # - final wannier90.x uses threaded linear algebra well
+    # - final wannier90.x uses threaded linear algebra well on one node, but
+    #   must stay MPI-distributed when the allocation spans multiple nodes
     serial_mpi = MPIConfig(n_cores=1, bind_to="none")
     pw2wan_mpi = MPIConfig(n_cores=total_cores, bind_to="core")
+    final_wannier_single_rank = int(n_nodes) == 1
 
     serial_env = (
         "env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 "
@@ -174,10 +176,13 @@ def wannier90_script(
         f"env OMP_NUM_THREADS={total_cores} MKL_NUM_THREADS={total_cores} "
         f"OPENBLAS_NUM_THREADS={total_cores} NUMEXPR_NUM_THREADS={total_cores}"
     )
+    final_wannier_env = threaded_env if final_wannier_single_rank else serial_env
+    final_wannier_mpi = serial_mpi if final_wannier_single_rank else pw2wan_mpi
+
     # Step 3: wannier90 main run
     wan_cmd = (
-        f"{threaded_env} "
-        + build_command("wannier90.x", extra_args=seedname, mpi=serial_mpi)
+        f"{final_wannier_env} "
+        + build_command("wannier90.x", extra_args=seedname, mpi=final_wannier_mpi)
     )
 
     commands: list[str]
@@ -206,8 +211,8 @@ def wannier90_script(
         job_name=f"w90_{seedname}",
         n_nodes=n_nodes,
         n_cores_per_node=n_cores_per_node,
-        mpi_procs_per_node=(1 if restart_only else n_cores_per_node),
-        omp_threads=(n_cores_per_node if restart_only else 1),
+        mpi_procs_per_node=(1 if restart_only and final_wannier_single_rank else n_cores_per_node),
+        omp_threads=(n_cores_per_node if restart_only and final_wannier_single_rank else 1),
         walltime=walltime,
         queue=queue,
         work_dir=work_dir,
