@@ -8231,6 +8231,68 @@ def _resolve_nanowire_benchmark_source_structure(
     return _ensure_pes_reference_structure_from_mp(source_cfg_seed)
 
 
+def _ensure_nanowire_benchmark_rgf_router_ready(*, selected_models: tuple[Any, ...]) -> dict[str, Any] | None:
+    needs_rgf = any(bool(getattr(model, "primary_for_rgf", False)) for model in selected_models)
+    if not needs_rgf:
+        return None
+
+    state = _load_init_state() or {}
+    rgf_root = state.get("rgf")
+    rgf_cluster = rgf_root.get("cluster") if isinstance(rgf_root, dict) else None
+    if isinstance(rgf_cluster, dict):
+        numerical_status = str(rgf_cluster.get("numerical_status") or "scaffold_only").strip().lower()
+        if bool(rgf_cluster.get("ready")) and numerical_status in {"phase1_ready", "phase2_experimental", "phase2_ready"}:
+            return rgf_cluster
+
+    click.echo(click.style("[benchmark] native RGF router: preparing cluster scaffold", fg="cyan"))
+    rgf_router_status = _prepare_cluster_rgf_router_setup(dry_run=False)
+    if rgf_router_status is None:
+        raise click.ClickException(
+            "Benchmark requires a native RGF cluster router, but router preparation was skipped."
+        )
+    _update_init_state(
+        {
+            "rgf": {
+                "cluster": rgf_router_status,
+            },
+            "solver_capabilities": {
+                "cluster": {
+                    "rgf": {
+                        "ready": bool(rgf_router_status.get("ready")),
+                        "binary_id": str(rgf_router_status.get("binary_id") or RGF_BINARY_ID),
+                        "binary_path": str(rgf_router_status.get("binary_path") or ""),
+                        "numerical_status": str(
+                            rgf_router_status.get("numerical_status") or "scaffold_only"
+                        ),
+                    }
+                }
+            },
+        }
+    )
+    numerical_status = str(rgf_router_status.get("numerical_status") or "scaffold_only").strip().lower()
+    if not bool(rgf_router_status.get("ready")) or numerical_status not in {
+        "phase1_ready",
+        "phase2_experimental",
+        "phase2_ready",
+    }:
+        raise click.ClickException(
+            "Benchmark requires a ready native RGF cluster router, but on-demand preparation did not "
+            "complete cleanly. Re-run `wtec init` or inspect the cluster scaffold build."
+        )
+    return rgf_router_status
+
+
+def _append_nanowire_benchmark_trace(trace_path: Path, event: str, **payload: Any) -> None:
+    trace_path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "ts": float(time.time()),
+        "event": str(event),
+    }
+    record.update(json.loads(json.dumps(payload, default=str)))
+    with trace_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
 def _run_rgf_benchmark_axis(
     *,
     source_cfg: dict[str, Any],
@@ -8250,15 +8312,35 @@ def _run_rgf_benchmark_axis(
 
     rgf_rows: list[dict[str, Any]] = []
     rgf_jobs: list[dict[str, Any]] = []
+    trace_path = axis_dir / "rgf_launch_trace.jsonl"
+    _append_nanowire_benchmark_trace(
+        trace_path,
+        "rgf_axis_start",
+        model_key=getattr(model, "key", ""),
+        axis=axis,
+        thicknesses=[int(v) for v in spec.thicknesses_uc],
+        energies_rel_fermi_ev=[float(v) for v in spec.energies_ev],
+    )
     for thickness_uc in spec.thicknesses_uc:
         for delta_e in spec.energies_ev:
             tag = (
                 f"d{int(thickness_uc):02d}_e"
                 f"{str(delta_e).replace('-', 'm').replace('.', 'p').replace('+', 'p')}"
             )
+            run_root = (axis_dir / "rgf" / tag).resolve()
+            run_root.mkdir(parents=True, exist_ok=True)
+            _append_nanowire_benchmark_trace(
+                trace_path,
+                "rgf_case_start",
+                tag=tag,
+                run_dir=str(run_root),
+                thickness_uc=int(thickness_uc),
+                energy_rel_fermi_ev=float(delta_e),
+                energy_abs_ev=float(fermi_ev_f + float(delta_e)),
+            )
             rgf_cfg = dict(source_cfg)
             rgf_cfg["name"] = f"nanowire_rgf_{model.key}_{axis}_{tag}"
-            rgf_cfg["run_dir"] = str((axis_dir / "rgf" / tag).resolve())
+            rgf_cfg["run_dir"] = str(run_root)
             rgf_cfg["hr_dat_path"] = canonical.hr_dat_path
             rgf_cfg["transport_backend"] = "qsub"
             rgf_cfg["transport_engine"] = "rgf"
@@ -8280,11 +8362,34 @@ def _run_rgf_benchmark_axis(
             rgf_cfg["_runtime_live_log"] = bool(live_log)
             rgf_cfg["_runtime_log_poll_interval"] = int(log_poll_interval)
             rgf_cfg["_runtime_stale_log_seconds"] = int(stale_log_seconds)
-            rgf_wf = TopoSlabWorkflow.from_config(rgf_cfg)
-            rgf_result, rgf_job = rgf_wf._stage_transport_rgf_qsub(
-                Path(canonical.hr_dat_path),
-                label="primary",
+            _append_nanowire_benchmark_trace(
+                trace_path,
+                "rgf_case_before_from_config",
+                tag=tag,
+                run_dir=str(run_root),
             )
+            try:
+                rgf_wf = TopoSlabWorkflow.from_config(rgf_cfg)
+                _append_nanowire_benchmark_trace(
+                    trace_path,
+                    "rgf_case_before_stage_transport",
+                    tag=tag,
+                    run_dir=str(run_root),
+                )
+                rgf_result, rgf_job = rgf_wf._stage_transport_rgf_qsub(
+                    Path(canonical.hr_dat_path),
+                    label="primary",
+                )
+            except Exception as exc:
+                _append_nanowire_benchmark_trace(
+                    trace_path,
+                    "rgf_case_exception",
+                    tag=tag,
+                    run_dir=str(run_root),
+                    exc_type=type(exc).__name__,
+                    exc_message=str(exc),
+                )
+                raise
             rgf_jobs.append(rgf_job)
             rgf_rows.append(
                 {
@@ -8293,6 +8398,13 @@ def _run_rgf_benchmark_axis(
                     "energy_abs_ev": float(fermi_ev_f + float(delta_e)),
                     "transmission_e2_over_h": _extract_single_transmission_from_rgf(rgf_result),
                 }
+            )
+            _append_nanowire_benchmark_trace(
+                trace_path,
+                "rgf_case_done",
+                tag=tag,
+                run_dir=str(run_root),
+                job_id=(rgf_job or {}).get("job_id"),
             )
     return rgf_rows, rgf_jobs
 
@@ -8401,6 +8513,7 @@ def benchmark_transport(
     spec = NanowireBenchmarkSpec()
     selected_models = select_benchmark_models(spec, include_supplementary=bool(all_models))
     transport_nodes = max(1, int(base_cfg.get("n_nodes", 1) or 1))
+    _ensure_nanowire_benchmark_rgf_router_ready(selected_models=selected_models)
     structure_file = _resolve_nanowire_benchmark_source_structure(
         base_cfg=base_cfg,
         benchmark_root=benchmark_root,
