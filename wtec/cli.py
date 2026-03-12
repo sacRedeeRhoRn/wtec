@@ -8208,6 +8208,12 @@ def _load_benchmark_source_resume(benchmark_root: Path) -> tuple[Path, Path, flo
     show_default=True,
     help="Warn if a benchmark job is RUNNING but logs do not grow for this long.",
 )
+@click.option(
+    "--all-models/--primary-model-only",
+    "all_models",
+    default=False,
+    help="Run every supplementary benchmark model instead of only the primary RGF model.",
+)
 def benchmark_transport(
     config_file: str | None,
     output_dir: str,
@@ -8216,6 +8222,7 @@ def benchmark_transport(
     live_log: bool,
     log_poll_interval: int,
     stale_log_seconds: int,
+    all_models: bool,
 ) -> None:
     """Generate and validate the TiS mp-1018028 nanowire transport benchmark."""
     from wtec.transport.nanowire_benchmark import (
@@ -8228,6 +8235,7 @@ def benchmark_transport(
         fit_rows_to_csv_lines,
         prepare_canonicalized_inputs,
         rows_to_csv_lines,
+        select_benchmark_models,
     )
     from wtec.transport.nanowire_benchmark_cluster import (
         submit_kwant_nanowire_reference,
@@ -8252,6 +8260,7 @@ def benchmark_transport(
     benchmark_root = _nanowire_benchmark_root(output_dir)
     benchmark_root.mkdir(parents=True, exist_ok=True)
     spec = NanowireBenchmarkSpec()
+    selected_models = select_benchmark_models(spec, include_supplementary=bool(all_models))
 
     source_cfg_seed = {
         "_runtime_config_dir": str(benchmark_root),
@@ -8263,10 +8272,19 @@ def benchmark_transport(
     }
     structure_file = _ensure_pes_reference_structure_from_mp(source_cfg_seed)
     click.echo(click.style(f"[benchmark] source structure: {structure_file}", fg="cyan"))
+    click.echo(
+        click.style(
+            "[benchmark] models: "
+            + ", ".join(f"{model.key}{'*' if model.primary_for_rgf else ''}" for model in selected_models),
+            fg="cyan",
+        )
+    )
 
     summary: dict[str, Any] = {
         "mp_id": spec.mp_id,
         "material": spec.material,
+        "model_scope": "all" if all_models else "primary_only",
+        "selected_model_keys": [str(model.key) for model in selected_models],
         "article_protocol": {
             "transport_axis_crystal": "[001]",
             "surface_of_interest": "(010)",
@@ -8289,7 +8307,7 @@ def benchmark_transport(
         )
     ).strip() or "python3"
 
-    for model in spec.models:
+    for model in selected_models:
         model_root = benchmark_root / model.key
         model_root.mkdir(parents=True, exist_ok=True)
         source_cfg = _build_tis_benchmark_source_cfg(
