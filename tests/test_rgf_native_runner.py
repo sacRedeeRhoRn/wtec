@@ -273,12 +273,17 @@ def test_rgf_native_runner_emits_progress_and_energy_for_full_finite(tmp_path: P
         text=True,
     )
 
-    raw = json.loads((tmp_path / "raw.json").read_text())["transport_results_raw"]
+    payload = json.loads((tmp_path / "raw.json").read_text())
+    raw = payload["transport_results_raw"]
+    runtime_cert = payload["runtime_cert"]
     progress_lines = (tmp_path / "progress.jsonl").read_text().splitlines()
 
     assert raw["mode"] == "full_finite"
     assert raw["energy"] == pytest.approx(0.25)
     assert raw["eta"] == pytest.approx(1.0e-6)
+    assert runtime_cert["wall_seconds"] >= 0.0
+    assert runtime_cert["aggregate_process_cpu_seconds"] >= 0.0
+    assert runtime_cert["effective_thread_count"] >= 0.0
     assert any('"event":"worker_start"' in line for line in progress_lines)
     assert any('"event":"native_point_start"' in line for line in progress_lines)
     assert any('"event":"native_point_done"' in line for line in progress_lines)

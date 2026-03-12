@@ -1375,11 +1375,14 @@ class TopoSlabWorkflow:
             )
         )
 
-        payload_name = "transport_payload.json"
-        raw_result_name = "transport_rgf_raw.json"
+        run_name = str(self.cfg.get("name", "run")).strip() or "run"
+        attempt_tag = self._transport_attempt_tag(str(label))
+        payload_name = self._attempt_artifact_name("transport_payload.json", attempt_tag)
+        raw_result_name = self._attempt_artifact_name("transport_rgf_raw.json", attempt_tag)
         result_name = "transport_result.json"
         cert_name = "transport_runtime_cert.json"
-        progress_name = "transport_progress.jsonl"
+        progress_name = self._attempt_artifact_name("transport_progress.jsonl", attempt_tag)
+        runtime_log_name = self._attempt_artifact_name("wtec_job.log", attempt_tag)
         payload_path = transport_dir / payload_name
         raw_result_path = transport_dir / raw_result_name
         final_result_path = transport_dir / result_name
@@ -1492,7 +1495,6 @@ class TopoSlabWorkflow:
         if canonical_win_path is not None and canonical_win_path.exists():
             stage_files.append(canonical_win_path)
 
-        run_name = str(self.cfg.get("name", "run")).strip() or "run"
         remote_dir = f"{self._remote_run_base(cfg)}/transport/{str(label)}"
         walltime = str(self.cfg.get("transport_walltime", "01:00:00"))
 
@@ -1583,6 +1585,7 @@ class TopoSlabWorkflow:
                 full_node_threading=bool(mpi_np == 1 and int(omp_threads) > 1),
             )
             job_name = f"rgf_{str(label)[:5]}_{run_name}"[:15]
+            stdout_log_name = self._attempt_artifact_name(f"{job_name}.log", attempt_tag)
             script = generate_script(
                 PBSJobConfig(
                     job_name=job_name,
@@ -1595,10 +1598,16 @@ class TopoSlabWorkflow:
                     work_dir=remote_dir,
                     modules=cfg.modules,
                     env_vars={},
+                    stdout_path=f"{remote_dir.rstrip('/')}/{stdout_log_name}",
+                    runtime_log_path=f"{remote_dir.rstrip('/')}/{runtime_log_name}",
                 ),
                 [cmd],
             )
-            local_script_path = transport_dir / f"transport_rgf_{str(label)}.pbs"
+            local_script_name = self._attempt_artifact_name(
+                f"transport_rgf_{str(label)}.pbs",
+                attempt_tag,
+            )
+            local_script_path = transport_dir / local_script_name
             local_script_path.write_text(script)
 
             meta = jm.submit_and_wait(
@@ -1608,17 +1617,17 @@ class TopoSlabWorkflow:
                 retrieve_patterns=[
                     raw_result_name,
                     progress_name,
-                    "wtec_job.log",
-                    f"{job_name}.log",
+                    runtime_log_name,
+                    stdout_log_name,
                     "*.out",
                 ],
-                script_name=f"transport_rgf_{str(label)}.pbs",
+                script_name=local_script_name,
                 stage_files=stage_files,
                 expected_local_outputs=[raw_result_name],
                 queue_used=queue_used,
                 poll_interval=int(self.cfg.get("_runtime_log_poll_interval", 5)),
                 live_log=bool(self.cfg.get("_runtime_live_log", True)),
-                live_files=["wtec_job.log", f"{job_name}.log", progress_name, raw_result_name],
+                live_files=[runtime_log_name, stdout_log_name, progress_name, raw_result_name],
                 stale_log_seconds=int(self.cfg.get("_runtime_stale_log_seconds", 300)),
                 retrieve_on_failure=retrieve_on_failure,
                 stream_from_start=stream_from_start,
@@ -1631,8 +1640,8 @@ class TopoSlabWorkflow:
                 local_script_path,
                 raw_result_path,
                 transport_dir / progress_name,
-                transport_dir / "wtec_job.log",
-                transport_dir / f"{job_name}.log",
+                transport_dir / runtime_log_name,
+                transport_dir / stdout_log_name,
             ],
         )
 
@@ -1717,8 +1726,28 @@ class TopoSlabWorkflow:
         shutil.copy2(final_result_path, attempt_dir / final_result_path.name)
         if isinstance(meta, dict):
             meta["attempt_dir"] = str(attempt_dir)
+            meta["attempt_tag"] = str(attempt_tag)
+            meta["attempt_artifacts"] = {
+                "payload": payload_name,
+                "raw_result": raw_result_name,
+                "progress": progress_name,
+                "runtime_log": runtime_log_name,
+                "stdout_log": stdout_log_name,
+                "script": local_script_name,
+            }
         if isinstance(meta_payload, dict):
             meta_payload["rgf_attempt_dir"] = str(attempt_dir)
+            meta_payload["rgf_attempt_tag"] = str(attempt_tag)
+            meta_payload["rgf_attempt_artifacts"] = _jsonable(
+                {
+                    "payload": payload_name,
+                    "raw_result": raw_result_name,
+                    "progress": progress_name,
+                    "runtime_log": runtime_log_name,
+                    "stdout_log": stdout_log_name,
+                    "script": local_script_name,
+                }
+            )
         return self._normalize_transport_results(results), meta
 
     @staticmethod
@@ -1748,6 +1777,23 @@ class TopoSlabWorkflow:
         else:
             exports += "export OMP_PROC_BIND=spread; export OMP_PLACES=cores; "
         return exports + command
+
+    @staticmethod
+    def _transport_attempt_tag(label: str) -> str:
+        label_token = "".join(
+            ch if (ch.isalnum() or ch in {"-", "_"}) else "_"
+            for ch in (label or "attempt")
+        )[:16] or "attempt"
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.localtime())
+        digest = hashlib.sha1(f"{label_token}-{time.time_ns()}".encode("utf-8")).hexdigest()[:8]
+        return f"{label_token}_{stamp}_{digest}"
+
+    @staticmethod
+    def _attempt_artifact_name(name: str, attempt_tag: str) -> str:
+        path = Path(str(name))
+        suffix = "".join(path.suffixes)
+        stem = path.name[: -len(suffix)] if suffix else path.name
+        return f"{stem}_{attempt_tag}{suffix}"
 
     @staticmethod
     def _archive_transport_attempt(

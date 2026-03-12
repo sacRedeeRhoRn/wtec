@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -43,6 +44,16 @@ extern void zgetrf_(
     double complex *a,
     const int *lda,
     int *ipiv,
+    int *info);
+extern void zgetrs_(
+    const char *trans,
+    const int *n,
+    const int *nrhs,
+    const double complex *a,
+    const int *lda,
+    const int *ipiv,
+    double complex *b,
+    const int *ldb,
     int *info);
 extern void zgetri_(
     const int *n,
@@ -174,6 +185,25 @@ static double wtec_wall_seconds(void) {
     return (double)time(NULL);
   }
   return (double)tv.tv_sec + 1.0e-6 * (double)tv.tv_usec;
+}
+
+static double wtec_process_cpu_seconds(void) {
+#if defined(CLOCK_PROCESS_CPUTIME_ID)
+  struct timespec ts;
+  if (clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &ts) == 0) {
+    return (double)ts.tv_sec + 1.0e-9 * (double)ts.tv_nsec;
+  }
+#endif
+  {
+    struct rusage usage;
+    if (getrusage(RUSAGE_SELF, &usage) == 0) {
+      return (double)usage.ru_utime.tv_sec +
+             1.0e-6 * (double)usage.ru_utime.tv_usec +
+             (double)usage.ru_stime.tv_sec +
+             1.0e-6 * (double)usage.ru_stime.tv_usec;
+    }
+  }
+  return 0.0;
 }
 
 static const char *wtec_point_kind_name(int point_kind) {
@@ -1172,6 +1202,40 @@ static double wtec_mat_norm_fro(const double complex *a, int n) {
   return sqrt(sum);
 }
 
+#if defined(WTEC_RGF_USE_LAPACK)
+static int wtec_lapack_lu_factor_row_major(
+    const double complex *a,
+    int n,
+    double complex *lu,
+    int *ipiv) {
+  int info = 0;
+  if (a == NULL || lu == NULL || ipiv == NULL || n <= 0) {
+    return -1;
+  }
+  memcpy(lu, a, (size_t)n * (size_t)n * sizeof(double complex));
+  zgetrf_(&n, &n, lu, &n, ipiv, &info);
+  return (info == 0) ? 0 : -1;
+}
+
+static int wtec_lapack_right_solve_row_major_from_lu(
+    const double complex *lu,
+    const int *ipiv,
+    const double complex *rhs,
+    int rows,
+    int n,
+    double complex *out) {
+  int info = 0;
+  const char trans = 'N';
+  const int nrhs = rows;
+  if (lu == NULL || ipiv == NULL || rhs == NULL || out == NULL || rows <= 0 || n <= 0) {
+    return -1;
+  }
+  memcpy(out, rhs, (size_t)rows * (size_t)n * sizeof(double complex));
+  zgetrs_(&trans, &n, &nrhs, lu, &n, ipiv, out, &n, &info);
+  return (info == 0) ? 0 : -1;
+}
+#endif
+
 static int wtec_mat_inverse(const double complex *a, int n, double complex *out) {
   int i, j, k, pivot_row;
 #if defined(WTEC_RGF_USE_LAPACK)
@@ -1183,10 +1247,8 @@ static int wtec_mat_inverse(const double complex *a, int n, double complex *out)
   if (n <= 0 || a == NULL || out == NULL) {
     return -1;
   }
-  memcpy(out, a, (size_t)n * (size_t)n * sizeof(double complex));
   ipiv = (int *)wtec_calloc((size_t)n, sizeof(int));
-  zgetrf_(&n, &n, out, &n, ipiv, &info);
-  if (info != 0) {
+  if (wtec_lapack_lu_factor_row_major(a, n, out, ipiv) != 0) {
     free(ipiv);
     return -1;
   }
@@ -1505,6 +1567,10 @@ static int wtec_surface_green_sancho(
   double complex *term2 = wtec_mat_alloc(n, n);
   double complex *next_a = wtec_mat_alloc(n, n);
   double complex *next_b = wtec_mat_alloc(n, n);
+#if defined(WTEC_RGF_USE_LAPACK)
+  double complex *lu = wtec_mat_alloc(n, n);
+  int *ipiv = (int *)wtec_calloc((size_t)n, sizeof(int));
+#endif
   int converged = 0;
   memcpy(alpha, v, (size_t)n * (size_t)n * sizeof(double complex));
   wtec_mat_conj_transpose(v, n, n, beta);
@@ -1513,26 +1579,35 @@ static int wtec_surface_green_sancho(
   wtec_progress_step(progress, ctx, phase, 0, WTEC_RGF_SANCHO_MAX_ITER);
   for (iter = 0; iter < WTEC_RGF_SANCHO_MAX_ITER; ++iter) {
     wtec_build_resolvent(eps, n, z, m);
+#if defined(WTEC_RGF_USE_LAPACK)
+    if (wtec_lapack_lu_factor_row_major(m, n, lu, ipiv) != 0) {
+      goto fail;
+    }
+    if (wtec_lapack_right_solve_row_major_from_lu(lu, ipiv, alpha, n, n, term1) != 0) {
+      goto fail;
+    }
+    if (wtec_lapack_right_solve_row_major_from_lu(lu, ipiv, beta, n, n, term2) != 0) {
+      goto fail;
+    }
+#else
     if (wtec_mat_inverse(m, n, ginv) != 0) {
       goto fail;
     }
     wtec_mat_mul(alpha, n, n, ginv, n, term1);
-    wtec_mat_mul(term1, n, n, beta, n, next_a);   /* alpha g beta */
     wtec_mat_mul(beta, n, n, ginv, n, term2);
+#endif
+    wtec_mat_mul(term1, n, n, beta, n, next_a);   /* alpha g beta */
     wtec_mat_mul(term2, n, n, alpha, n, next_b);  /* beta g alpha */
     wtec_mat_add_inplace(eps_s, next_a, n * n);
     wtec_mat_add_inplace(eps, next_a, n * n);
     wtec_mat_add_inplace(eps, next_b, n * n);
-    wtec_mat_mul(alpha, n, n, ginv, n, term1);
     wtec_mat_mul(term1, n, n, alpha, n, next_a);
-    wtec_mat_mul(beta, n, n, ginv, n, term2);
     wtec_mat_mul(term2, n, n, beta, n, next_b);
     memcpy(alpha, next_a, (size_t)n * (size_t)n * sizeof(double complex));
     memcpy(beta, next_b, (size_t)n * (size_t)n * sizeof(double complex));
     wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
     if (wtec_mat_norm_fro(alpha, n * n) + wtec_mat_norm_fro(beta, n * n) < WTEC_RGF_SANCHO_TOL) {
       converged = 1;
-      wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
       break;
     }
   }
@@ -1545,10 +1620,18 @@ static int wtec_surface_green_sancho(
   }
   free(alpha); free(beta); free(eps); free(eps_s); free(m); free(ginv);
   free(term1); free(term2); free(next_a); free(next_b);
+#if defined(WTEC_RGF_USE_LAPACK)
+  free(lu);
+  free(ipiv);
+#endif
   return 0;
 fail:
   free(alpha); free(beta); free(eps); free(eps_s); free(m); free(ginv);
   free(term1); free(term2); free(next_a); free(next_b);
+#if defined(WTEC_RGF_USE_LAPACK)
+  free(lu);
+  free(ipiv);
+#endif
   return -1;
 }
 
@@ -2562,7 +2645,10 @@ static int wtec_write_result_file(
     int max_p_eff,
     int max_slice_count,
     int max_superslice_dim,
-    int transport_task_count) {
+    int transport_task_count,
+    double transport_wall_seconds,
+    double aggregate_process_cpu_seconds,
+    double effective_thread_count) {
   FILE *fh = fopen(path, "w");
   int i;
   int sector_count = (strcmp(payload->mode, "periodic_transverse") == 0) ? payload->n_layers_y : 1;
@@ -2647,6 +2733,9 @@ static int wtec_write_result_file(
   fprintf(fh, "    \"max_slice_count\": %d,\n", max_slice_count);
   fprintf(fh, "    \"max_superslice_dim\": %d,\n", max_superslice_dim);
   fprintf(fh, "    \"safe_rank_cap\": %d,\n", mpi_size);
+  fprintf(fh, "    \"wall_seconds\": %.6f,\n", transport_wall_seconds);
+  fprintf(fh, "    \"aggregate_process_cpu_seconds\": %.6f,\n", aggregate_process_cpu_seconds);
+  fprintf(fh, "    \"effective_thread_count\": %.6f,\n", effective_thread_count);
   fprintf(
       fh,
       "    \"build_env\": {\"openmp_enabled\": %s, \"omp_max_threads\": %d, \"blas_backend\": \"%s\", \"blas_linalg_enabled\": %s},\n",
@@ -2842,6 +2931,12 @@ int main(int argc, char **argv) {
   int length_sample_count = 0;
   int length_sector_count = 0;
   int transport_task_count = 0;
+  double transport_started_wall_s = 0.0;
+  double transport_started_cpu_s = 0.0;
+  double transport_wall_s_local = 0.0;
+  double transport_wall_s_global = 0.0;
+  double transport_cpu_s_local = 0.0;
+  double transport_cpu_s_global = 0.0;
   int u;
 
   if (rc != MPI_SUCCESS) {
@@ -2964,6 +3059,8 @@ int main(int argc, char **argv) {
   wtec_progress_init(&progress, &payload, rank, size);
   wtec_progress_emit_runner_event(&progress, "worker_start", &payload, transport_task_count);
   wtec_progress_emit_runner_event(&progress, "transport_run_start", &payload, transport_task_count);
+  transport_started_wall_s = wtec_wall_seconds();
+  transport_started_cpu_s = wtec_process_cpu_seconds();
 
   thickness_sample_count = payload.n_disorder * payload.n_thickness * payload.n_ensemble;
   thickness_sector_count = payload.n_disorder * payload.n_thickness * sector_count;
@@ -3188,9 +3285,23 @@ int main(int argc, char **argv) {
   MPI_Reduce(&max_p_local, &max_p_global, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
   MPI_Reduce(&max_slice_local, &max_slice_global, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
   MPI_Reduce(&max_dim_local, &max_dim_global, 1, MPI_INT, MPI_MAX, 0, MPI_COMM_WORLD);
+  transport_wall_s_local = wtec_wall_seconds() - transport_started_wall_s;
+  transport_cpu_s_local = wtec_process_cpu_seconds() - transport_started_cpu_s;
+  if (transport_wall_s_local < 0.0) {
+    transport_wall_s_local = 0.0;
+  }
+  if (transport_cpu_s_local < 0.0) {
+    transport_cpu_s_local = 0.0;
+  }
+  MPI_Reduce(&transport_wall_s_local, &transport_wall_s_global, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  MPI_Reduce(&transport_cpu_s_local, &transport_cpu_s_global, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
 
   if (rank == 0) {
     int d, i, ens, sector;
+    const double effective_thread_count =
+        (transport_wall_s_global > 0.0)
+            ? (transport_cpu_s_global / transport_wall_s_global)
+            : 0.0;
     if (payload.n_disorder * payload.n_thickness > 0) {
       thickness_g_mean =
           (double *)wtec_calloc((size_t)payload.n_disorder * (size_t)payload.n_thickness, sizeof(double));
@@ -3288,7 +3399,10 @@ int main(int argc, char **argv) {
             max_p_global,
             max_slice_global,
             max_dim_global,
-            transport_task_count) != 0) {
+            transport_task_count,
+            transport_wall_s_global,
+            transport_cpu_s_global,
+            effective_thread_count) != 0) {
       errflag_global = 1;
     }
     free(thickness_g_mean);

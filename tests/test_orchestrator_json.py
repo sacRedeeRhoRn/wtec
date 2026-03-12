@@ -8,6 +8,12 @@ from wtec.workflow.orchestrator import TopoSlabWorkflow, _jsonable
 from wtec.wannier.parser import HoppingData, write_hr_dat
 
 
+def _one_match(directory: Path, pattern: str) -> Path:
+    matches = sorted(directory.glob(pattern))
+    assert len(matches) == 1
+    return matches[0]
+
+
 def test_orchestrator_jsonable_converts_numpy_payloads() -> None:
     payload = {
         "arr": np.array([1.0, 2.0]),
@@ -387,7 +393,10 @@ def test_stage_transport_rgf_qsub_writes_standard_transport_payload(tmp_path, mo
         def submit_and_wait(self, script, remote_dir, local_dir, retrieve_patterns, script_name, stage_files, expected_local_outputs, queue_used, **kwargs):
             captured["retrieve_patterns"] = list(retrieve_patterns)
             captured["live_files"] = list(kwargs.get("live_files", []))
-            captured["payload"] = json.loads(Path(local_dir, "transport_payload.json").read_text())
+            captured["payload"] = json.loads(Path(stage_files[0]).read_text())
+            for name in retrieve_patterns:
+                if name.endswith(".jsonl") or name.endswith(".log"):
+                    Path(local_dir, name).write_text(f"{name}\n")
             raw = {
                 "transport_results_raw": {
                     "engine": "rgf",
@@ -452,22 +461,25 @@ def test_stage_transport_rgf_qsub_writes_standard_transport_payload(tmp_path, mo
     assert results["meta"]["transport_engine"] == "rgf"
     assert results["meta"]["energy_eV"] == 0.25
     assert results["thickness_scan"][0.0]["G_mean"] == [1.0, 2.0]
-    assert captured["payload"]["progress_file"] == "transport_progress.jsonl"
+    assert captured["payload"]["progress_file"].startswith("transport_progress_primary_")
+    assert captured["payload"]["progress_file"].endswith(".jsonl")
     assert captured["payload"]["logging_detail"] == "per_step"
     assert captured["payload"]["heartbeat_seconds"] == 11
     assert captured["payload"]["parallel_policy_resolved"] == "throughput"
     assert captured["payload"]["expected_mpi_np"] == 5
     assert captured["payload"]["expected_omp_threads"] == 6
-    assert "transport_progress.jsonl" in captured["retrieve_patterns"]
-    assert "transport_progress.jsonl" in captured["live_files"]
+    assert captured["payload"]["progress_file"] in captured["retrieve_patterns"]
+    assert captured["payload"]["progress_file"] in captured["live_files"]
     written = json.loads((Path(cfg["run_dir"]) / "transport" / "primary" / "transport_result.json").read_text())
     assert written["runtime_cert"]["numerical_status"] == "phase1_ready"
     assert written["runtime_cert"]["parallel_policy"] == "throughput"
     assert written["runtime_cert"]["omp_threads"] == 6
     attempt_dir = Path(meta["attempt_dir"])
     assert attempt_dir.is_dir()
-    assert (attempt_dir / "transport_payload.json").exists()
-    assert (attempt_dir / "transport_rgf_raw.json").exists()
+    assert _one_match(attempt_dir, "transport_payload_primary_*.json").exists()
+    assert _one_match(attempt_dir, "transport_rgf_raw_primary_*.json").exists()
+    assert _one_match(attempt_dir, "transport_progress_primary_*.jsonl").exists()
+    assert _one_match(attempt_dir, "wtec_job_primary_*.log").exists()
 
 
 def test_stage_transport_rgf_qsub_canonicalizes_axes_and_uses_single_point_threads(tmp_path, monkeypatch) -> None:
@@ -565,7 +577,7 @@ def test_stage_transport_rgf_qsub_canonicalizes_axes_and_uses_single_point_threa
             return None
 
         def submit_and_wait(self, script, remote_dir, local_dir, retrieve_patterns, script_name, stage_files, expected_local_outputs, queue_used, **kwargs):
-            captured["payload"] = json.loads(Path(local_dir, "transport_payload.json").read_text())
+            captured["payload"] = json.loads(Path(stage_files[0]).read_text())
             raw = {
                 "transport_results_raw": {
                     "engine": "rgf",
@@ -638,6 +650,8 @@ def test_stage_transport_rgf_qsub_canonicalizes_axes_and_uses_single_point_threa
     assert written["runtime_cert"]["omp_threads"] == 32
     attempt_dir = Path(meta["attempt_dir"])
     assert attempt_dir.is_dir()
+    assert _one_match(attempt_dir, "transport_payload_primary_*.json").exists()
+    assert _one_match(attempt_dir, "transport_rgf_raw_primary_*.json").exists()
     assert (attempt_dir / "transport_result.json").exists()
     assert (attempt_dir / "transport_runtime_cert.json").exists()
 
@@ -737,7 +751,7 @@ def test_stage_transport_rgf_qsub_caps_single_point_threads_without_threaded_bac
             return None
 
         def submit_and_wait(self, script, remote_dir, local_dir, retrieve_patterns, script_name, stage_files, expected_local_outputs, queue_used, **kwargs):
-            captured["payload"] = json.loads(Path(local_dir, "transport_payload.json").read_text())
+            captured["payload"] = json.loads(Path(stage_files[0]).read_text())
             raw = {
                 "transport_results_raw": {
                     "engine": "rgf",
@@ -809,4 +823,5 @@ def test_stage_transport_rgf_qsub_caps_single_point_threads_without_threaded_bac
     assert written["runtime_cert"]["threaded_single_point_backend"] is False
     attempt_dir = Path(meta["attempt_dir"])
     assert attempt_dir.is_dir()
-    assert (attempt_dir / "transport_payload.json").exists()
+    assert _one_match(attempt_dir, "transport_payload_primary_*.json").exists()
+    assert _one_match(attempt_dir, "transport_rgf_raw_primary_*.json").exists()

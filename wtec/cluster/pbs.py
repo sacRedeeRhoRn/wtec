@@ -15,12 +15,16 @@ class PBSJobConfig:
     job_name: str
     n_nodes: int = 1
     n_cores_per_node: int = 32
+    mpi_procs_per_node: int | None = None
+    omp_threads: int | None = None
     walltime: str = "24:00:00"      # HH:MM:SS
     memory_gb: int | None = None
     queue: str | None = None
     work_dir: str = "."
     modules: list[str] = field(default_factory=list)
     env_vars: dict[str, str] = field(default_factory=dict)
+    stdout_path: str | None = None
+    runtime_log_path: str | None = None
     # NOTE: fork launchstyle is forbidden. Thread env vars are allowed only
     # with mpirun-launched workloads; no fork-based process backend is used.
 
@@ -64,13 +68,23 @@ def generate_script(
 
     queue_line = f"#PBS -q {config.queue}" if config.queue else ""
     mem_line = f"#PBS -l mem={int(config.memory_gb)}gb" if config.memory_gb else ""
-    log_path = f"{config.work_dir.rstrip('/')}/{config.job_name}.log"
-
-    runtime_log_path = f"{config.work_dir.rstrip('/')}/wtec_job.log"
+    mpi_procs_per_node = int(
+        config.mpi_procs_per_node
+        if config.mpi_procs_per_node is not None
+        else config.n_cores_per_node
+    )
+    omp_threads = int(config.omp_threads if config.omp_threads is not None else 1)
+    resource_line = (
+        "#PBS -l "
+        f"select={config.n_nodes}:ncpus={config.n_cores_per_node}:"
+        f"mpiprocs={mpi_procs_per_node}:ompthreads={omp_threads}"
+    )
+    log_path = config.stdout_path or f"{config.work_dir.rstrip('/')}/{config.job_name}.log"
+    runtime_log_path = config.runtime_log_path or f"{config.work_dir.rstrip('/')}/wtec_job.log"
 
     script = f"""#!/bin/bash
 #PBS -N {config.job_name}
-#PBS -l nodes={config.n_nodes}:ppn={config.n_cores_per_node}
+{resource_line}
 #PBS -l walltime={config.walltime}
 {mem_line}
 {queue_line}
@@ -139,31 +153,65 @@ def wannier90_script(
     queue: str | None = None,
     modules: list[str] | None = None,
     env_vars: dict[str, str] | None = None,
+    restart_only: bool = False,
 ) -> str:
     """Convenience builder for a Wannier90 PBS script."""
     from wtec.cluster.mpi import MPIConfig, build_command
 
-    mpi = MPIConfig(n_cores=n_nodes * n_cores_per_node)
-    # Step 1: preprocessing (compute NNKPts)
-    pre_cmd = build_command("wannier90.x", extra_args=f"-pp {seedname}", mpi=mpi)
-    # Step 2: pw2wannier90
-    pw2wan_cmd = build_command(
-        "pw2wannier90.x",
-        input_file=f"{seedname}.pw2wan.in",
-        output_file=f"{seedname}.pw2wan.out",
-        mpi=mpi,
+    total_cores = int(n_nodes) * int(n_cores_per_node)
+    # Step-specific layout:
+    # - wannier90.x -pp is cheap and effectively serial
+    # - pw2wannier90.x parallelizes over k-point pools, not OpenMP threads
+    # - final wannier90.x uses threaded linear algebra well
+    serial_mpi = MPIConfig(n_cores=1, bind_to="none")
+    pw2wan_mpi = MPIConfig(n_cores=total_cores, bind_to="core")
+
+    serial_env = (
+        "env OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 "
+        "NUMEXPR_NUM_THREADS=1"
+    )
+    threaded_env = (
+        f"env OMP_NUM_THREADS={total_cores} MKL_NUM_THREADS={total_cores} "
+        f"OPENBLAS_NUM_THREADS={total_cores} NUMEXPR_NUM_THREADS={total_cores}"
     )
     # Step 3: wannier90 main run
-    wan_cmd = build_command("wannier90.x", extra_args=seedname, mpi=mpi)
+    wan_cmd = (
+        f"{threaded_env} "
+        + build_command("wannier90.x", extra_args=seedname, mpi=serial_mpi)
+    )
+
+    commands: list[str]
+    if restart_only:
+        commands = [wan_cmd]
+    else:
+        # Step 1: preprocessing (compute NNKPts)
+        pre_cmd = (
+            f"{serial_env} "
+            + build_command("wannier90.x", extra_args=f"-pp {seedname}", mpi=serial_mpi)
+        )
+        # Step 2: pw2wannier90
+        pw2wan_cmd = (
+            f"{serial_env} "
+            + build_command(
+                "pw2wannier90.x",
+                input_file=f"{seedname}.pw2wan.in",
+                output_file=f"{seedname}.pw2wan.out",
+                mpi=pw2wan_mpi,
+                extra_args=f"-nk {total_cores}",
+            )
+        )
+        commands = [pre_cmd, pw2wan_cmd, wan_cmd]
 
     cfg = PBSJobConfig(
         job_name=f"w90_{seedname}",
         n_nodes=n_nodes,
         n_cores_per_node=n_cores_per_node,
+        mpi_procs_per_node=(1 if restart_only else n_cores_per_node),
+        omp_threads=(n_cores_per_node if restart_only else 1),
         walltime=walltime,
         queue=queue,
         work_dir=work_dir,
         modules=modules or [],
         env_vars=env_vars or {},
     )
-    return generate_script(cfg, [pre_cmd, pw2wan_cmd, wan_cmd])
+    return generate_script(cfg, commands)
