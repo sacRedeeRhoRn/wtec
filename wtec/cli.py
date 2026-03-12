@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
@@ -8182,6 +8183,84 @@ def _load_benchmark_source_resume(benchmark_root: Path) -> tuple[Path, Path, flo
     return hr_path, win_path, float(fermi_ev)
 
 
+def _run_rgf_benchmark_axis(
+    *,
+    source_cfg: dict[str, Any],
+    axis_dir: Path,
+    canonical: Any,
+    model: Any,
+    axis: str,
+    spec: Any,
+    fermi_ev_f: float,
+    length_uc: int,
+    transport_nodes: int,
+    live_log: bool,
+    log_poll_interval: int,
+    stale_log_seconds: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from wtec.workflow.orchestrator import TopoSlabWorkflow
+
+    rgf_rows: list[dict[str, Any]] = []
+    rgf_jobs: list[dict[str, Any]] = []
+    for thickness_uc in spec.thicknesses_uc:
+        for delta_e in spec.energies_ev:
+            tag = (
+                f"d{int(thickness_uc):02d}_e"
+                f"{str(delta_e).replace('-', 'm').replace('.', 'p').replace('+', 'p')}"
+            )
+            rgf_cfg = dict(source_cfg)
+            rgf_cfg["name"] = f"nanowire_rgf_{model.key}_{axis}_{tag}"
+            rgf_cfg["run_dir"] = str((axis_dir / "rgf" / tag).resolve())
+            rgf_cfg["hr_dat_path"] = canonical.hr_dat_path
+            rgf_cfg["transport_backend"] = "qsub"
+            rgf_cfg["transport_engine"] = "rgf"
+            rgf_cfg["transport_rgf_mode"] = "full_finite"
+            rgf_cfg["transport_rgf_full_finite_sigma_backend"] = "native"
+            rgf_cfg["transport_rgf_full_finite_kwant_script"] = ""
+            rgf_cfg["thicknesses"] = [int(thickness_uc)]
+            rgf_cfg["disorder_strengths"] = [0.0]
+            rgf_cfg["n_ensemble"] = 1
+            rgf_cfg["mfp_lengths"] = []
+            rgf_cfg["fermi_shift_eV"] = float(fermi_ev_f + float(delta_e))
+            rgf_cfg["transport_axis"] = "x"
+            rgf_cfg["thickness_axis"] = "z"
+            rgf_cfg["transport_n_layers_x"] = int(length_uc)
+            rgf_cfg["transport_n_layers_y"] = int(spec.fixed_width_uc)
+            rgf_cfg["n_nodes"] = int(transport_nodes)
+            rgf_cfg["reuse_transport_results"] = False
+            rgf_cfg["transport_strict_qsub"] = True
+            rgf_cfg["_runtime_live_log"] = bool(live_log)
+            rgf_cfg["_runtime_log_poll_interval"] = int(log_poll_interval)
+            rgf_cfg["_runtime_stale_log_seconds"] = int(stale_log_seconds)
+            rgf_wf = TopoSlabWorkflow.from_config(rgf_cfg)
+            rgf_result, rgf_job = rgf_wf._stage_transport_rgf_qsub(
+                Path(canonical.hr_dat_path),
+                label="primary",
+            )
+            rgf_jobs.append(rgf_job)
+            rgf_rows.append(
+                {
+                    "thickness_uc": int(thickness_uc),
+                    "energy_rel_fermi_ev": float(delta_e),
+                    "energy_abs_ev": float(fermi_ev_f + float(delta_e)),
+                    "transmission_e2_over_h": _extract_single_transmission_from_rgf(rgf_result),
+                }
+            )
+    return rgf_rows, rgf_jobs
+
+
+def _run_kwant_and_rgf_overlap(
+    *,
+    submit_kwant_reference,
+    run_rgf_axis,
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="nanowire-kwant") as executor:
+        kwant_future = executor.submit(submit_kwant_reference)
+        rgf_rows, rgf_jobs = run_rgf_axis()
+        kwant_result, kwant_job = kwant_future.result()
+    return kwant_result, kwant_job, rgf_rows, rgf_jobs
+
+
 @main.command("benchmark-transport")
 @click.argument("config_file", required=False, type=click.Path(dir_okay=False))
 @click.option(
@@ -8429,6 +8508,8 @@ def benchmark_transport(
 
             kwant_benchmark_dir = axis_dir / "kwant"
             kwant_reference_path = kwant_benchmark_dir / "kwant_reference.json"
+            rgf_rows: list[dict[str, Any]] | None = None
+            rgf_jobs: list[dict[str, Any]] | None = None
             if kwant_reference_path.exists():
                 kwant_result = json.loads(kwant_reference_path.read_text())
                 kwant_job = {"status": "reused", "path": str(kwant_reference_path)}
@@ -8439,22 +8520,62 @@ def benchmark_transport(
                     )
                 )
             else:
-                kwant_result, kwant_job = submit_kwant_nanowire_reference(
-                    canonical_input=canonical,
-                    benchmark_dir=kwant_benchmark_dir,
-                    spec=spec,
-                    model_key=model.key,
-                    model_label=model.label,
-                    fermi_ev=fermi_ev_f,
-                    length_uc=length_uc,
-                    queue_override=queue,
-                    n_nodes=int(transport_nodes),
-                    walltime=walltime,
-                    python_executable=source_python,
-                    live_log=live_log,
-                    poll_interval=log_poll_interval,
-                    stale_log_seconds=stale_log_seconds,
-                )
+                if model.primary_for_rgf:
+                    click.echo(
+                        click.style(
+                            f"[benchmark] model={model.key} axis={axis}: launching Kwant and native RGF in parallel",
+                            fg="cyan",
+                        )
+                    )
+                    kwant_result, kwant_job, rgf_rows, rgf_jobs = _run_kwant_and_rgf_overlap(
+                        submit_kwant_reference=lambda: submit_kwant_nanowire_reference(
+                            canonical_input=canonical,
+                            benchmark_dir=kwant_benchmark_dir,
+                            spec=spec,
+                            model_key=model.key,
+                            model_label=model.label,
+                            fermi_ev=fermi_ev_f,
+                            length_uc=length_uc,
+                            queue_override=queue,
+                            n_nodes=int(transport_nodes),
+                            walltime=walltime,
+                            python_executable=source_python,
+                            live_log=False,
+                            poll_interval=log_poll_interval,
+                            stale_log_seconds=stale_log_seconds,
+                        ),
+                        run_rgf_axis=lambda: _run_rgf_benchmark_axis(
+                            source_cfg=source_cfg,
+                            axis_dir=axis_dir,
+                            canonical=canonical,
+                            model=model,
+                            axis=axis,
+                            spec=spec,
+                            fermi_ev_f=fermi_ev_f,
+                            length_uc=length_uc,
+                            transport_nodes=int(transport_nodes),
+                            live_log=live_log,
+                            log_poll_interval=log_poll_interval,
+                            stale_log_seconds=stale_log_seconds,
+                        ),
+                    )
+                else:
+                    kwant_result, kwant_job = submit_kwant_nanowire_reference(
+                        canonical_input=canonical,
+                        benchmark_dir=kwant_benchmark_dir,
+                        spec=spec,
+                        model_key=model.key,
+                        model_label=model.label,
+                        fermi_ev=fermi_ev_f,
+                        length_uc=length_uc,
+                        queue_override=queue,
+                        n_nodes=int(transport_nodes),
+                        walltime=walltime,
+                        python_executable=source_python,
+                        live_log=live_log,
+                        poll_interval=log_poll_interval,
+                        stale_log_seconds=stale_log_seconds,
+                    )
 
             kwant_validation = (
                 kwant_result.get("validation", {})
@@ -8506,52 +8627,21 @@ def benchmark_transport(
                 continue
 
             if model.primary_for_rgf:
-                rgf_rows: list[dict[str, Any]] = []
-                rgf_jobs: list[dict[str, Any]] = []
-                for thickness_uc in spec.thicknesses_uc:
-                    for delta_e in spec.energies_ev:
-                        tag = (
-                            f"d{int(thickness_uc):02d}_e"
-                            f"{str(delta_e).replace('-', 'm').replace('.', 'p').replace('+', 'p')}"
-                        )
-                        rgf_cfg = dict(source_cfg)
-                        rgf_cfg["name"] = f"nanowire_rgf_{model.key}_{axis}_{tag}"
-                        rgf_cfg["run_dir"] = str((axis_dir / "rgf" / tag).resolve())
-                        rgf_cfg["hr_dat_path"] = canonical.hr_dat_path
-                        rgf_cfg["transport_backend"] = "qsub"
-                        rgf_cfg["transport_engine"] = "rgf"
-                        rgf_cfg["transport_rgf_mode"] = "full_finite"
-                        rgf_cfg["transport_rgf_full_finite_sigma_backend"] = "native"
-                        rgf_cfg["transport_rgf_full_finite_kwant_script"] = ""
-                        rgf_cfg["thicknesses"] = [int(thickness_uc)]
-                        rgf_cfg["disorder_strengths"] = [0.0]
-                        rgf_cfg["n_ensemble"] = 1
-                        rgf_cfg["mfp_lengths"] = []
-                        rgf_cfg["fermi_shift_eV"] = float(fermi_ev_f + float(delta_e))
-                        rgf_cfg["transport_axis"] = "x"
-                        rgf_cfg["thickness_axis"] = "z"
-                        rgf_cfg["transport_n_layers_x"] = int(length_uc)
-                        rgf_cfg["transport_n_layers_y"] = int(spec.fixed_width_uc)
-                        rgf_cfg["n_nodes"] = int(transport_nodes)
-                        rgf_cfg["reuse_transport_results"] = False
-                        rgf_cfg["transport_strict_qsub"] = True
-                        rgf_cfg["_runtime_live_log"] = bool(live_log)
-                        rgf_cfg["_runtime_log_poll_interval"] = int(log_poll_interval)
-                        rgf_cfg["_runtime_stale_log_seconds"] = int(stale_log_seconds)
-                        rgf_wf = TopoSlabWorkflow.from_config(rgf_cfg)
-                        rgf_result, rgf_job = rgf_wf._stage_transport_rgf_qsub(
-                            Path(canonical.hr_dat_path),
-                            label="primary",
-                        )
-                        rgf_jobs.append(rgf_job)
-                        rgf_rows.append(
-                            {
-                                "thickness_uc": int(thickness_uc),
-                                "energy_rel_fermi_ev": float(delta_e),
-                                "energy_abs_ev": float(fermi_ev_f + float(delta_e)),
-                                "transmission_e2_over_h": _extract_single_transmission_from_rgf(rgf_result),
-                            }
-                        )
+                if rgf_rows is None or rgf_jobs is None:
+                    rgf_rows, rgf_jobs = _run_rgf_benchmark_axis(
+                        source_cfg=source_cfg,
+                        axis_dir=axis_dir,
+                        canonical=canonical,
+                        model=model,
+                        axis=axis,
+                        spec=spec,
+                        fermi_ev_f=fermi_ev_f,
+                        length_uc=length_uc,
+                        transport_nodes=int(transport_nodes),
+                        live_log=live_log,
+                        log_poll_interval=log_poll_interval,
+                        stale_log_seconds=stale_log_seconds,
+                    )
 
                 rgf_fit = build_article_fit_summary(
                     rgf_rows,

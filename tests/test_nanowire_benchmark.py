@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from threading import Event
 from pathlib import Path
 
 import numpy as np
 
-from wtec.cli import _build_tis_benchmark_source_cfg
+from wtec.cli import _build_tis_benchmark_source_cfg, _run_kwant_and_rgf_overlap
 from wtec.config.materials import get_material
 from wtec.qe.lcao import get_projections
 from wtec.transport.nanowire_benchmark import (
@@ -83,6 +84,36 @@ def test_build_tis_benchmark_source_cfg_uses_explicit_source_nodes(tmp_path: Pat
     assert cfg["n_nodes"] == 2
     assert cfg["run_dir"].endswith("bench/source_run")
     assert cfg["transport_backend"] == "qsub"
+
+
+def test_run_kwant_and_rgf_overlap_runs_rgf_while_kwant_waits() -> None:
+    kwant_started = Event()
+    allow_kwant_finish = Event()
+    call_order: list[str] = []
+
+    def _submit_kwant_reference():
+        call_order.append("kwant_started")
+        kwant_started.set()
+        assert allow_kwant_finish.wait(timeout=2.0)
+        call_order.append("kwant_finished")
+        return {"results": []}, {"status": "kwant"}
+
+    def _run_rgf_axis():
+        assert kwant_started.wait(timeout=2.0)
+        call_order.append("rgf_ran")
+        allow_kwant_finish.set()
+        return [{"thickness_uc": 1}], [{"status": "rgf"}]
+
+    kwant_result, kwant_job, rgf_rows, rgf_jobs = _run_kwant_and_rgf_overlap(
+        submit_kwant_reference=_submit_kwant_reference,
+        run_rgf_axis=_run_rgf_axis,
+    )
+
+    assert call_order == ["kwant_started", "rgf_ran", "kwant_finished"]
+    assert kwant_result == {"results": []}
+    assert kwant_job == {"status": "kwant"}
+    assert rgf_rows == [{"thickness_uc": 1}]
+    assert rgf_jobs == [{"status": "rgf"}]
 
 
 def test_axis_permutation_maps_expected_axes() -> None:
