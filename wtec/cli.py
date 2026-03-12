@@ -1563,7 +1563,9 @@ def _setup_workspace(
             "env_updates_applied": sorted(env_updates.keys()),
             "runtime_env": runtime_env,
         }
-        (workspace / "init_state.json").write_text(json.dumps(init_state, indent=2))
+        existing_state = _read_init_state_file(workspace) or {}
+        merged_state = _deep_merge_dict(existing_state, init_state)
+        (workspace / "init_state.json").write_text(json.dumps(merged_state, indent=2))
 
     _write_slab_template(
         cwd=Path.cwd(),
@@ -4429,8 +4431,8 @@ def _wtec_state_dir() -> Path:
     return (Path.home() / ".wtec").expanduser().resolve()
 
 
-def _load_init_state() -> dict[str, Any] | None:
-    state_path = _wtec_state_dir() / "init_state.json"
+def _read_init_state_file(state_dir: Path) -> dict[str, Any] | None:
+    state_path = state_dir / "init_state.json"
     if not state_path.exists():
         return None
     try:
@@ -4438,6 +4440,26 @@ def _load_init_state() -> dict[str, Any] | None:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _load_init_state() -> dict[str, Any] | None:
+    env_dir = os.environ.get("WTEC_STATE_DIR")
+    if isinstance(env_dir, str) and env_dir.strip():
+        return _read_init_state_file(Path(env_dir).expanduser().resolve())
+
+    global_state_dir = (Path.home() / ".wtec").expanduser().resolve()
+    global_state = _read_init_state_file(global_state_dir)
+
+    local_state_dir = _local_wtec_state_dir()
+    if not local_state_dir.exists():
+        return global_state
+
+    local_state = _read_init_state_file(local_state_dir)
+    if local_state is None:
+        return global_state
+    if global_state is None:
+        return local_state
+    return _deep_merge_dict(global_state, local_state)
 
 
 def _deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
@@ -8351,6 +8373,7 @@ def _run_rgf_benchmark_axis(
             rgf_cfg["transport_engine"] = "rgf"
             rgf_cfg["transport_rgf_mode"] = "full_finite"
             rgf_cfg["transport_rgf_full_finite_sigma_backend"] = "native"
+            rgf_cfg["_transport_rgf_internal_sigma_mode"] = "kwant_exact"
             rgf_cfg["transport_rgf_full_finite_kwant_script"] = ""
             rgf_cfg["thicknesses"] = [int(thickness_uc)]
             rgf_cfg["disorder_strengths"] = [0.0]

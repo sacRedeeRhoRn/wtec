@@ -656,6 +656,203 @@ def test_stage_transport_rgf_qsub_canonicalizes_axes_and_uses_single_point_threa
     assert (attempt_dir / "transport_runtime_cert.json").exists()
 
 
+def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_precompute(
+    tmp_path, monkeypatch
+) -> None:
+    state_dir = tmp_path / ".wtec"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "init_state.json").write_text(
+        json.dumps(
+            {
+                "rgf": {
+                    "cluster": {
+                        "ready": True,
+                        "binary_id": "wtec_rgf_runner_phase2_v6",
+                        "binary_path": "/remote/wtec_rgf_runner",
+                        "numerical_status": "phase2_experimental",
+                        "probe": {"build_env": {"openmp_enabled": True, "blas_backend": "openblas"}},
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("WTEC_STATE_DIR", str(state_dir))
+
+    hd = HoppingData(
+        num_wann=1,
+        r_vectors=np.array([[0, 0, 0], [0, 0, 1], [0, 0, -1]], dtype=int),
+        deg=np.array([1, 1, 1], dtype=int),
+        H_R=np.array([[[0.0 + 0.0j]], [[-1.0 + 0.0j]], [[-1.0 + 0.0j]]], dtype=complex),
+    )
+    hr_dat = tmp_path / "toy_full_finite_exact_sigma_hr.dat"
+    write_hr_dat(hr_dat, hd, header="toy chain z-lead exact sigma")
+    (tmp_path / "TaP.win").write_text(
+        "\n".join(
+            [
+                "begin unit_cell_cart",
+                "ang",
+                "1.0 0.0 0.0",
+                "0.0 1.0 0.0",
+                "0.0 0.0 1.0",
+                "end unit_cell_cart",
+            ]
+        )
+        + "\n"
+    )
+
+    cfg = {
+        "name": "demo_ff_exact_sigma",
+        "material": "TaP",
+        "run_dir": str(tmp_path / "run_ff_exact_sigma"),
+        "transport_engine": "rgf",
+        "transport_backend": "qsub",
+        "transport_strict_qsub": True,
+        "transport_axis": "z",
+        "thickness_axis": "x",
+        "transport_rgf_mode": "full_finite",
+        "transport_rgf_parallel_policy": "auto",
+        "transport_rgf_full_finite_sigma_backend": "native",
+        "_transport_rgf_internal_sigma_mode": "kwant_exact",
+        "transport_cluster_python_exe": "python3",
+        "transport_n_layers_x": 3,
+        "transport_n_layers_y": 2,
+        "mfp_n_layers_z": 1,
+        "thicknesses": [1],
+        "mfp_lengths": [],
+        "disorder_strengths": [0.0],
+        "n_ensemble": 1,
+    }
+    wf = TopoSlabWorkflow.from_config(cfg)
+    wf._state = {"stage": "WANNIER90", "outputs": {}}
+    captured: dict[str, object] = {}
+
+    class _FakeMPIConfig:
+        def __init__(self, n_cores=1, bind_to="core", **kwargs):
+            self.n_cores = n_cores
+            self.bind_to = bind_to
+
+    class _FakePBSJobConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class _FakeClusterConfig:
+        remote_workdir = "/remote/wtec_runs"
+        pbs_queue = "g2"
+        pbs_queue_priority = ["g2"]
+        modules = []
+        bin_dirs = []
+
+        def cores_for_queue(self, _queue):
+            return 32
+
+    class _FakeJM:
+        def __init__(self, ssh):
+            self.ssh = ssh
+
+        def resolve_queue(self, preferred, fallback_order=None):
+            return preferred or "g2"
+
+        def ensure_remote_commands(self, commands, modules=None, bin_dirs=None):
+            return None
+
+        def submit_and_wait(
+            self,
+            script,
+            remote_dir,
+            local_dir,
+            retrieve_patterns,
+            script_name,
+            stage_files,
+            expected_local_outputs,
+            queue_used,
+            **kwargs,
+        ):
+            captured["script"] = script
+            captured["retrieve_patterns"] = list(retrieve_patterns)
+            captured["stage_file_names"] = [Path(path).name for path in stage_files]
+            captured["payload"] = json.loads(Path(stage_files[0]).read_text())
+            raw = {
+                "transport_results_raw": {
+                    "engine": "rgf",
+                    "mode": "full_finite",
+                    "periodic_axis": "y",
+                    "lead_axis": "x",
+                    "thickness_axis": "z",
+                    "n_layers_x": 3,
+                    "n_layers_y": 2,
+                    "mfp_n_layers_z": 1,
+                    "energy": 0.0,
+                    "eta": 1.0e-6,
+                    "thicknesses": [1],
+                    "thickness_G": [1.0],
+                    "thickness_p_eff": [1],
+                    "thickness_slice_count": [1],
+                    "thickness_superslice_dim": [6],
+                    "mfp_lengths": [],
+                    "length_G": [],
+                    "length_p_eff": [],
+                    "length_slice_count": [],
+                    "length_superslice_dim": [],
+                },
+                "runtime_cert": {
+                    "engine": "rgf",
+                    "binary_id": "wtec_rgf_runner_phase2_v6",
+                    "numerical_status": "phase2_experimental",
+                    "mpi_size": 1,
+                    "max_slice_count": 1,
+                    "max_superslice_dim": 6,
+                },
+            }
+            Path(local_dir, expected_local_outputs[0]).write_text(json.dumps(raw, indent=2))
+            for name in ("sigma_manifest.json", "sigma_left.bin", "sigma_right.bin"):
+                Path(local_dir, name).write_text(name)
+            return {"job_id": "1003", "queue": queue_used, "status": "COMPLETED"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "wtec.cluster.mpi",
+        types.SimpleNamespace(
+            MPIConfig=_FakeMPIConfig,
+            build_command=lambda executable, mpi=None, extra_args="": f"mpirun -np {mpi.n_cores} {executable} {extra_args}".strip(),
+        ),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "wtec.cluster.pbs",
+        types.SimpleNamespace(
+            PBSJobConfig=_FakePBSJobConfig,
+            generate_script=lambda cfg, commands: "\n".join(commands),
+        ),
+    )
+    monkeypatch.setitem(sys.modules, "wtec.cluster.ssh", types.SimpleNamespace(open_ssh=lambda cfg: _SSH()))
+    monkeypatch.setitem(sys.modules, "wtec.cluster.submit", types.SimpleNamespace(JobManager=_FakeJM))
+    monkeypatch.setitem(
+        sys.modules,
+        "wtec.config.cluster",
+        types.SimpleNamespace(ClusterConfig=types.SimpleNamespace(from_env=lambda: _FakeClusterConfig())),
+    )
+
+    results, meta = wf._stage_transport_rgf_qsub(hr_dat, label="primary")
+    assert meta["job_id"] == "1003"
+    assert results["meta"]["transport_engine"] == "rgf"
+    assert "wtec.transport.kwant_sigma_extract" in str(captured["script"])
+    assert "--hr-path " in str(captured["script"])
+    assert "_canonical_hr.dat" in str(captured["script"])
+    assert "sigma_manifest.json" in captured["retrieve_patterns"]
+    assert "sigma_left.bin" in captured["retrieve_patterns"]
+    assert "sigma_right.bin" in captured["retrieve_patterns"]
+    assert "wtec_src.zip" in captured["stage_file_names"]
+    assert captured["payload"]["sigma_left_path"] == "sigma_left.bin"
+    assert captured["payload"]["sigma_right_path"] == "sigma_right.bin"
+    written = json.loads((Path(cfg["run_dir"]) / "transport" / "primary" / "transport_result.json").read_text())
+    assert written["runtime_cert"]["full_finite_sigma_source"] == "kwant_exact"
+    attempt_dir = Path(meta["attempt_dir"])
+    assert attempt_dir.is_dir()
+    assert (attempt_dir / "sigma_manifest.json").exists()
+    assert (attempt_dir / "sigma_left.bin").exists()
+    assert (attempt_dir / "sigma_right.bin").exists()
+
+
 def test_stage_transport_rgf_qsub_caps_single_point_threads_without_threaded_backend(tmp_path, monkeypatch) -> None:
     state_dir = tmp_path / ".wtec"
     state_dir.mkdir(parents=True, exist_ok=True)

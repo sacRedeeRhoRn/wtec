@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from threading import Event
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -12,6 +13,7 @@ from wtec.cli import (
     _build_tis_benchmark_source_cfg,
     _ensure_nanowire_benchmark_rgf_router_ready,
     _resolve_nanowire_benchmark_source_structure,
+    _run_rgf_benchmark_axis,
     _run_kwant_and_rgf_overlap,
 )
 from wtec.config.materials import get_material
@@ -264,6 +266,55 @@ def test_run_kwant_and_rgf_overlap_runs_rgf_while_kwant_waits() -> None:
     assert kwant_job == {"status": "kwant"}
     assert rgf_rows == [{"thickness_uc": 1}]
     assert rgf_jobs == [{"status": "rgf"}]
+
+
+def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
+    tmp_path: Path, monkeypatch
+) -> None:
+    seen_cfgs: list[dict] = []
+
+    class _FakeWorkflow:
+        def __init__(self, cfg: dict) -> None:
+            self.cfg = cfg
+
+        def _stage_transport_rgf_qsub(self, hr_path: Path, label: str = "primary"):
+            seen_cfgs.append(dict(self.cfg))
+            return (
+                {
+                    "thickness_scan": {"0.0": {"G_mean": [12.5]}},
+                },
+                {"job_id": "12345"},
+            )
+
+    monkeypatch.setattr(
+        "wtec.workflow.orchestrator.TopoSlabWorkflow.from_config",
+        lambda cfg: _FakeWorkflow(cfg),
+    )
+    rows, jobs = _run_rgf_benchmark_axis(
+        source_cfg={"material": "TiS"},
+        axis_dir=tmp_path / "axis",
+        canonical=SimpleNamespace(hr_dat_path=str(tmp_path / "toy_hr.dat")),
+        model=SimpleNamespace(key="model_b"),
+        axis="c",
+        spec=SimpleNamespace(thicknesses_uc=(1,), energies_ev=(-0.2,), fixed_width_uc=13),
+        fermi_ev_f=13.6046,
+        length_uc=24,
+        transport_nodes=1,
+        live_log=False,
+        log_poll_interval=5,
+        stale_log_seconds=300,
+    )
+
+    assert rows == [
+        {
+            "thickness_uc": 1,
+            "energy_rel_fermi_ev": -0.2,
+            "energy_abs_ev": 13.4046,
+            "transmission_e2_over_h": 12.5,
+        }
+    ]
+    assert jobs == [{"job_id": "12345"}]
+    assert seen_cfgs and seen_cfgs[0]["_transport_rgf_internal_sigma_mode"] == "kwant_exact"
 
 
 def test_axis_permutation_maps_expected_axes() -> None:

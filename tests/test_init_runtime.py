@@ -120,6 +120,137 @@ def test_update_init_state_deep_merges_rgf_router_state(tmp_path: Path, monkeypa
     assert payload["rgf"]["cluster"]["ready"] is True
 
 
+def test_load_init_state_merges_global_router_into_local_workspace_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    global_state_dir = tmp_path / ".wtec"
+    global_state_dir.mkdir(parents=True, exist_ok=True)
+    (global_state_dir / "init_state.json").write_text(
+        json.dumps(
+            {
+                "rgf": {
+                    "cluster": {
+                        "ready": True,
+                        "binary_id": cli.RGF_BINARY_ID,
+                        "binary_path": "/remote/wtec_rgf_runner",
+                        "numerical_status": "phase2_experimental",
+                    }
+                },
+                "runtime_env": {"MPLCONFIGDIR": "/tmp/global-mpl"},
+            }
+        )
+    )
+
+    local_state_dir = workspace / ".wtec"
+    local_state_dir.mkdir(parents=True, exist_ok=True)
+    (local_state_dir / "init_state.json").write_text(
+        json.dumps(
+            {
+                "cwd": str(workspace),
+                "runtime_env": {"XDG_CACHE_HOME": "/tmp/local-xdg"},
+            }
+        )
+    )
+
+    payload = cli._load_init_state()
+    assert payload is not None
+    assert payload["cwd"] == str(workspace)
+    assert payload["runtime_env"]["MPLCONFIGDIR"] == "/tmp/global-mpl"
+    assert payload["runtime_env"]["XDG_CACHE_HOME"] == "/tmp/local-xdg"
+    assert payload["rgf"]["cluster"]["binary_id"] == cli.RGF_BINARY_ID
+    assert payload["rgf"]["cluster"]["ready"] is True
+
+
+def test_update_init_state_preserves_global_router_when_local_state_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+
+    global_state_dir = tmp_path / ".wtec"
+    global_state_dir.mkdir(parents=True, exist_ok=True)
+    (global_state_dir / "init_state.json").write_text(
+        json.dumps(
+            {
+                "rgf": {
+                    "cluster": {
+                        "ready": True,
+                        "binary_id": cli.RGF_BINARY_ID,
+                        "binary_path": "/remote/wtec_rgf_runner",
+                        "numerical_status": "phase2_experimental",
+                    }
+                }
+            }
+        )
+    )
+
+    local_state_dir = workspace / ".wtec"
+    local_state_dir.mkdir(parents=True, exist_ok=True)
+    (local_state_dir / "init_state.json").write_text(json.dumps({"cwd": str(workspace)}))
+
+    cli._update_init_state(
+        {
+            "solver_capabilities": {
+                "cluster": {
+                    "kwant": {"solver": "mumps", "mumps_available": True},
+                }
+            }
+        }
+    )
+
+    payload = json.loads((local_state_dir / "init_state.json").read_text())
+    assert payload["cwd"] == str(workspace)
+    assert payload["solver_capabilities"]["cluster"]["kwant"]["solver"] == "mumps"
+    assert payload["rgf"]["cluster"]["binary_path"] == "/remote/wtec_rgf_runner"
+    assert payload["rgf"]["cluster"]["ready"] is True
+
+
+def test_setup_workspace_preserves_existing_router_state(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(cli.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    workspace = tmp_path / ".wtec"
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "init_state.json").write_text(
+        json.dumps(
+            {
+                "rgf": {
+                    "cluster": {
+                        "ready": True,
+                        "binary_id": cli.RGF_BINARY_ID,
+                        "binary_path": "/remote/wtec_rgf_runner",
+                        "numerical_status": "phase2_experimental",
+                    }
+                }
+            }
+        )
+    )
+
+    cli._setup_workspace(
+        dry_run=False,
+        env_updates={"TOPOSLAB_REMOTE_WORKDIR": "/tmp/remote-runs"},
+        overwrite_env=True,
+        overwrite_slab_template=False,
+        venv_path=tmp_path / ".venv",
+        venv_python=tmp_path / ".venv" / "bin" / "python",
+    )
+
+    payload = json.loads((workspace / "init_state.json").read_text())
+    assert payload["rgf"]["cluster"]["ready"] is True
+    assert payload["rgf"]["cluster"]["binary_id"] == cli.RGF_BINARY_ID
+    assert payload["venv_path"] == str((tmp_path / ".venv").resolve())
+    assert payload["runtime_env"]["WTEC_STATE_DIR"] == str(workspace.resolve())
+
+
 def test_verify_install_raises_on_kwant_abi_mismatch(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, **kwargs):
         code = cmd[-1]

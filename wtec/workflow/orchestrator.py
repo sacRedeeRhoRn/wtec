@@ -1424,6 +1424,9 @@ class TopoSlabWorkflow:
         sigma_backend = str(
             self.cfg.get("transport_rgf_full_finite_sigma_backend", "native")
         ).strip().lower() or "native"
+        internal_sigma_mode = str(
+            self.cfg.get("_transport_rgf_internal_sigma_mode", sigma_backend)
+        ).strip().lower() or sigma_backend
         rgf_parallel_policy = normalize_rgf_parallel_policy(
             self.cfg.get("transport_rgf_parallel_policy", "auto")
         )
@@ -1497,6 +1500,34 @@ class TopoSlabWorkflow:
 
         remote_dir = f"{self._remote_run_base(cfg)}/transport/{str(label)}"
         walltime = str(self.cfg.get("transport_walltime", "01:00:00"))
+        python_exe = str(
+            self.cfg.get(
+                "transport_cluster_python_exe",
+                self.cfg.get("topology", {}).get("cluster_python_exe", "python3"),
+            )
+        ).strip() or "python3"
+        sigma_manifest_name: str | None = None
+        sigma_left_name: str | None = None
+        sigma_right_name: str | None = None
+        worker_zip: Path | None = None
+        if internal_sigma_mode == "kwant_exact":
+            if rgf_mode != "full_finite":
+                raise RuntimeError(
+                    "_transport_rgf_internal_sigma_mode='kwant_exact' currently requires "
+                    "transport_rgf_mode='full_finite'."
+                )
+            if len(thicknesses) != 1 or mfp_lengths:
+                raise RuntimeError(
+                    "_transport_rgf_internal_sigma_mode='kwant_exact' is currently supported only "
+                    "for single-thickness transport jobs without MFP sweeps."
+                )
+            worker_zip = self._worker_source_zip(transport_dir)
+            sigma_manifest_name = "sigma_manifest.json"
+            sigma_left_name = "sigma_left.bin"
+            sigma_right_name = "sigma_right.bin"
+            payload["sigma_left_path"] = sigma_left_name
+            payload["sigma_right_path"] = sigma_right_name
+            stage_files.append(worker_zip)
 
         with open_ssh(cfg) as ssh:
             jm = JobManager(ssh)
@@ -1584,6 +1615,28 @@ class TopoSlabWorkflow:
                 threads=int(omp_threads),
                 full_node_threading=bool(mpi_np == 1 and int(omp_threads) > 1),
             )
+            commands: list[str] = []
+            if internal_sigma_mode == "kwant_exact":
+                assert worker_zip is not None
+                assert sigma_manifest_name is not None
+                assert sigma_left_name is not None
+                assert sigma_right_name is not None
+                sigma_cmd = build_command(
+                    f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}",
+                    mpi=MPIConfig(n_cores=1, bind_to="none"),
+                    extra_args=(
+                        "-m wtec.transport.kwant_sigma_extract "
+                        f"--hr-path {shlex.quote(canonical_hr_path.name)} "
+                        f"--length-uc {int(n_layers_x)} "
+                        f"--width-uc {int(n_layers_y)} "
+                        f"--thickness-uc {int(thicknesses[0])} "
+                        f"--energy-ev {float(payload['energy']):.16g} "
+                        f"--eta-ev {float(payload['eta']):.16g} "
+                        f"--out-dir {shlex.quote('.')}"
+                    ),
+                )
+                commands.append(sigma_cmd)
+            commands.append(cmd)
             job_name = f"rgf_{str(label)[:5]}_{run_name}"[:15]
             stdout_log_name = self._attempt_artifact_name(f"{job_name}.log", attempt_tag)
             script = generate_script(
@@ -1601,7 +1654,7 @@ class TopoSlabWorkflow:
                     stdout_path=f"{remote_dir.rstrip('/')}/{stdout_log_name}",
                     runtime_log_path=f"{remote_dir.rstrip('/')}/{runtime_log_name}",
                 ),
-                [cmd],
+                commands,
             )
             local_script_name = self._attempt_artifact_name(
                 f"transport_rgf_{str(label)}.pbs",
@@ -1619,6 +1672,7 @@ class TopoSlabWorkflow:
                     progress_name,
                     runtime_log_name,
                     stdout_log_name,
+                    *( [sigma_manifest_name, sigma_left_name, sigma_right_name] if sigma_manifest_name else [] ),
                     "*.out",
                 ],
                 script_name=local_script_name,
@@ -1639,6 +1693,7 @@ class TopoSlabWorkflow:
                 payload_path,
                 local_script_path,
                 raw_result_path,
+                *( [transport_dir / sigma_manifest_name, transport_dir / sigma_left_name, transport_dir / sigma_right_name] if sigma_manifest_name else [] ),
                 transport_dir / progress_name,
                 transport_dir / runtime_log_name,
                 transport_dir / stdout_log_name,
@@ -1663,6 +1718,7 @@ class TopoSlabWorkflow:
         runtime_cert["build_env"] = _jsonable(
             build_probe.get("build_env", {}) if isinstance(build_probe, dict) else {}
         )
+        runtime_cert["full_finite_sigma_source"] = str(internal_sigma_mode)
         runtime_cert["validate_against"] = str(rgf_validate_against)
         runtime_cert["canonicalized_input"] = bool(canonical_input.was_canonicalized)
         runtime_cert["axis_mapping"] = {
@@ -1686,6 +1742,7 @@ class TopoSlabWorkflow:
             meta_payload["rgf_full_finite_sigma_backend"] = str(
                 self.cfg.get("transport_rgf_full_finite_sigma_backend", "native")
             ).strip().lower() or "native"
+            meta_payload["rgf_full_finite_sigma_source"] = str(internal_sigma_mode)
             kwant_script_cfg = str(
                 self.cfg.get("transport_rgf_full_finite_kwant_script", "")
             ).strip()
