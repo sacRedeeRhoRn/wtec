@@ -87,6 +87,10 @@ def fuchs_sondheimer_rho(
 
     Used as a reference to contrast with topological film behaviour.
 
+    Two implementations are provided:
+    - Asymptotic (Chambers 1950): ρ_FS/ρ_bulk ≈ 1 + (3/8)(1−p)/κ   (κ ≫ 1)
+    - Exact integral (Fuchs 1938, Sondheimer 1952): full numerical integration
+
     Parameters
     ----------
     rho_bulk : float
@@ -109,6 +113,121 @@ def fuchs_sondheimer_rho(
     # Exact integral for κ ~ 1 would require scipy.integrate
     correction = (3.0 / 8.0) * (1.0 - specularity) / np.maximum(kappa, 1e-10)
     return rho_bulk * (1.0 + correction)
+
+
+def fuchs_sondheimer_rho_exact(
+    rho_bulk: float,
+    mfp_m: float,
+    thickness_m: np.ndarray,
+    specularity: float = 0.0,
+) -> np.ndarray:
+    """Exact Fuchs-Sondheimer resistivity via numerical integration.
+
+    Uses the full Fuchs (1938) / Sondheimer (1952) integral:
+
+        ρ_FS/ρ_bulk = [1 − (3/2κ)(1−p) ∫₁^∞ (1/u³ − 1/u⁵)
+                        × (1 − exp(−κu)) / (1 − p·exp(−κu)) du]⁻¹
+
+    where κ = d/ℓ (Knudsen number).
+
+    Valid for all κ (thin film to bulk limit).  Requires scipy.
+
+    Parameters
+    ----------
+    rho_bulk : float
+    mfp_m : float
+    thickness_m : np.ndarray
+    specularity : float  p ∈ [0, 1]
+
+    Returns
+    -------
+    np.ndarray  Resistivity (Ω·m).
+    """
+    try:
+        from scipy.integrate import quad
+    except ImportError:
+        # Fallback to asymptotic if scipy unavailable
+        return fuchs_sondheimer_rho(rho_bulk, mfp_m, thickness_m, specularity)
+
+    kappa_arr = np.atleast_1d(np.asarray(thickness_m, dtype=float)) / float(mfp_m)
+    p = float(np.clip(specularity, 0.0, 1.0))
+    results = np.zeros_like(kappa_arr)
+
+    for i, kappa in enumerate(kappa_arr):
+        k = float(kappa)
+        if k <= 0:
+            results[i] = np.inf
+            continue
+
+        def integrand(u: float) -> float:
+            exp_ku = np.exp(-k * u)
+            denom = 1.0 - p * exp_ku
+            if abs(denom) < 1e-30:
+                return 0.0
+            return (1.0 / u ** 3 - 1.0 / u ** 5) * (1.0 - exp_ku) / denom
+
+        I, _ = quad(integrand, 1.0, np.inf, limit=500, epsabs=1e-10, epsrel=1e-8)
+        ratio = 1.0 - 1.5 * (1.0 - p) * I / k
+        results[i] = float(rho_bulk) / ratio if ratio > 1e-15 else np.inf
+
+    return results
+
+
+def conductance_finite_temperature(
+    fsys,
+    mu: float,
+    T_kelvin: float,
+    *,
+    n_E: int = 80,
+    E_window_kT: float = 6.0,
+) -> float:
+    """Landauer conductance at finite temperature via thermal smearing.
+
+    G(T) = (e²/h) ∫ T(E) · (−∂f/∂E) dE
+
+    where  −∂f/∂E = sech²((E−μ)/2kT) / (4kT)  is the thermal smearing kernel.
+
+    Parameters
+    ----------
+    fsys : kwant.system.FiniteSystem  (finalized)
+    mu : float  Chemical potential / Fermi energy (eV).
+    T_kelvin : float  Temperature (K).  Use 0 to return zero-T conductance.
+    n_E : int  Number of energy points for integration.
+    E_window_kT : float  Integration window half-width in units of kT.
+
+    Returns
+    -------
+    float  Conductance in e²/h.
+    """
+    try:
+        import kwant
+    except ImportError:
+        raise ImportError("kwant is required")
+
+    if float(T_kelvin) <= 0.0:
+        smat = kwant.smatrix(fsys, float(mu))
+        return float(smat.transmission(0, 1))
+
+    kT = 8.617e-5 * float(T_kelvin)
+    E_min = float(mu) - float(E_window_kT) * kT
+    E_max = float(mu) + float(E_window_kT) * kT
+    E_vals = np.linspace(E_min, E_max, max(10, int(n_E)))
+
+    T_vals = np.array([
+        kwant.smatrix(fsys, E).transmission(0, 1)
+        for E in E_vals
+    ], dtype=float)
+
+    # Thermal smearing kernel: −∂f/∂E = sech²((E−μ)/2kT) / (4kT)
+    x = (E_vals - float(mu)) / (2.0 * kT)
+    kernel = 1.0 / (np.cosh(x) ** 2 * 4.0 * kT)
+    # Normalise kernel to 1 (numerical)
+    norm = np.trapz(kernel, E_vals)
+    if abs(norm) > 1e-20:
+        kernel /= norm
+
+    G = float(np.trapz(T_vals * kernel, E_vals))
+    return max(0.0, G)
 
 
 def fit_two_channel_conductance(

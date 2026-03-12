@@ -71,6 +71,23 @@ def _dH_dk_frac(tb_model, k: np.ndarray, axis: int, delta: float = 1e-4) -> np.n
     return (hp - hm) / (2.0 * delta)
 
 
+def _fractional_to_cartesian_k_jacobian(tb_model) -> np.ndarray:
+    """Return ∂k_frac / ∂k_cart in Angstrom units.
+
+    Fractional coordinates satisfy k_cart = k_frac @ B, where the rows of B are
+    reciprocal lattice vectors in Angstrom^{-1}. Therefore:
+
+        ∂/∂k_cart = (B^{-1}) · ∂/∂k_frac
+
+    and B^{-1} has units of Angstrom.
+    """
+    lv = np.asarray(getattr(tb_model, "lattice_vectors"), dtype=float)
+    if lv.shape != (3, 3):
+        raise ValueError("tb_model.lattice_vectors must have shape (3, 3)")
+    recip = 2.0 * np.pi * np.linalg.inv(lv).T
+    return np.linalg.inv(recip)
+
+
 def _chirality_proxy(tb_model, k: np.ndarray, band_idx: int) -> tuple[int | None, float]:
     """Estimate chirality sign from 2-band projected velocity Jacobian."""
     h = np.array(tb_model.hamiltonian_at_k(k), dtype=complex)
@@ -326,6 +343,28 @@ def scan_weyl_nodes(
                 continue
             deduped.append(node)
 
+        # Enrich each node with velocity tensor (best-effort, never fails scan)
+        for node in deduped:
+            try:
+                vt = compute_weyl_velocity_tensor(
+                    tb_model,
+                    np.array(node["k_frac"], dtype=float),
+                    int(node["band_idx"]),
+                )
+                if vt.get("status") == "ok":
+                    node["v_fermi_ev_ang"] = vt["v_fermi_ev_ang"]
+                    node["v_perp_ev_ang"] = vt["v_perp_ev_ang"]
+                    node["v_parallel_ev_ang"] = vt["v_parallel_ev_ang"]
+                    node["lambda_arc_uc_est"] = vt["lambda_arc_uc_est"]
+                    node["velocity_tensor"] = vt["velocity_tensor"]
+            except Exception:
+                pass  # velocity enrichment is best-effort only
+
+        # Validate Nielson-Ninomiya: Σ_i χ_i = 0
+        chiralities = [node.get("chirality") for node in deduped if node.get("chirality") is not None]
+        chir_sum = sum(int(c) for c in chiralities)
+        nn_satisfied = (chir_sum == 0) if chiralities else None
+
         status = "ok" if deduped else "partial"
         out = {
             "status": status,
@@ -338,11 +377,114 @@ def scan_weyl_nodes(
             "node_method_requested": method_requested,
             "node_method_effective": method_effective,
             "node_method_warning": method_warning,
+            "chirality_sum": int(chir_sum),
+            "nielson_ninomiya_satisfied": nn_satisfied,
         }
     if comm is not None:
         out = comm.bcast(out, root=0)
     assert out is not None
     return out
+
+
+def compute_weyl_velocity_tensor(
+    tb_model,
+    k_node: np.ndarray,
+    band_idx: int,
+    *,
+    delta: float = 1e-3,
+) -> dict:
+    """Extract the anisotropic velocity tensor at a Weyl node.
+
+    Near a Weyl node at **K**_W, the low-energy Hamiltonian is:
+
+        H_Weyl(**k**) = χ ℏ v_F (**k** − **K**_W) · **σ**
+                      = Σ_{i,j} v_{ij} (k_i − K_{W,i}) σ_j
+
+    The velocity tensor v_{ij} = ⟨u_n|∂H/∂k_i|u_{n+1}⟩ projected onto the
+    2-band subspace around the node.
+
+    Physically:
+    - v_F = (1/3) Tr|**v**|  (isotropic Fermi velocity average)
+    - Fermi arc k-width ≈ |K_{W+,∥} − K_{W−,∥}|  (pair separation)
+    - Arc penetration depth λ_arc = ℏ v_⊥ / Δ_bulk
+
+    Parameters
+    ----------
+    tb_model : WannierTBModel
+    k_node : (3,) array  Weyl node position (fractional).
+    band_idx : int  Lower band index of the near-degenerate pair.
+    delta : float  Finite-difference step for velocity.
+
+    Returns
+    -------
+    dict with keys:
+        velocity_tensor : (3, 3) float  v_{ij} (eV per unit of k in 1/Å)
+        v_fermi_ev_ang : float  Isotropic Fermi velocity (eV·Å)
+        v_perp_ev_ang : float  Velocity along surface normal (z-axis) (eV·Å)
+        v_parallel_ev_ang : float  In-plane velocity (eV·Å)
+        lambda_arc_uc_est : float  Estimated arc penetration depth (uc)
+            using Δ_bulk = gap at node and c-axis lattice constant.
+        status : str
+    """
+    k = _wrap_k(np.asarray(k_node, dtype=float))
+    h = np.array(tb_model.hamiltonian_at_k(k), dtype=complex)
+    evals, evecs = np.linalg.eigh(h)
+    n = int(band_idx)
+    if n < 0 or n + 1 >= len(evals):
+        return {"status": "failed", "reason": "band_idx_out_of_range"}
+
+    # Two-band subspace projector
+    u = evecs[:, [n, n + 1]]   # (n_orb, 2)
+
+    # Velocity tensor elements v_{ij} = ⟨u|∂H/∂k_i|u⟩ projected onto σ_j
+    sigma = [_SIGMA_X, _SIGMA_Y, _SIGMA_Z]
+    v_tensor = np.zeros((3, 3), dtype=float)   # v_tensor[i, j] for ∂H/∂k_i, σ_j
+
+    for ax_i in range(3):
+        dH = _dH_dk_frac(tb_model, k, ax_i, delta=float(delta))
+        A = u.conj().T @ dH @ u   # (2, 2) projected velocity
+        for ax_j in range(3):
+            v_tensor[ax_i, ax_j] = float(0.5 * np.trace(A @ sigma[ax_j]).real)
+
+    try:
+        frac_to_cart = _fractional_to_cartesian_k_jacobian(tb_model)
+        v_tensor = frac_to_cart @ v_tensor
+    except Exception:
+        # Keep the original fractional-coordinate derivative as a fallback, but
+        # this should only happen for malformed lattice metadata.
+        pass
+
+    # Isotropic Fermi velocity from the singular values of the physical tensor.
+    singular_vals = np.linalg.svd(v_tensor, compute_uv=False)
+    v_f = float(np.mean(np.abs(singular_vals)))
+
+    # Surface-normal (z) and in-plane velocities
+    v_perp = float(np.linalg.norm(v_tensor[2, :]))
+    v_par = float(np.mean([np.linalg.norm(v_tensor[0, :]), np.linalg.norm(v_tensor[1, :])]))
+
+    # Arc penetration depth estimate: λ_arc = ℏ v_⊥ / Δ_bulk
+    # Δ_bulk ≈ gap at the node position; ℏ = 1 in eV·s, v_⊥ in eV·Å
+    delta_bulk = float(evals[n + 1] - evals[n]) if len(evals) > n + 1 else 0.0
+    try:
+        c_ang = float(np.linalg.norm(tb_model.lattice_vectors[2]))  # c-axis in Å
+    except Exception:
+        c_ang = 11.89  # TaP default
+    if delta_bulk > 1e-6 and v_perp > 1e-6 and c_ang > 0:
+        lambda_uc = (v_perp / delta_bulk) / c_ang  # (eV·Å / eV) / Å = dimensionless uc
+    else:
+        lambda_uc = float("nan")
+
+    return {
+        "status": "ok",
+        "velocity_tensor": v_tensor.tolist(),
+        "v_fermi_ev_ang": float(v_f),
+        "v_perp_ev_ang": float(v_perp),
+        "v_parallel_ev_ang": float(v_par),
+        "gap_at_node_ev": float(delta_bulk),
+        "lambda_arc_uc_est": float(lambda_uc),
+        "k_node": k.tolist(),
+        "band_idx": int(n),
+    }
 
 
 def compute_chern_profile(
