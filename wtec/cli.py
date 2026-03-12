@@ -5816,9 +5816,6 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
         # Falls back to DFT/Wannier generation if hr_dat isn't provided.
         cluster_required = True
 
-    if transport_only and transport_backend == "qsub":
-        cluster_required = True
-
     if not cluster_required:
         if transport_only:
             source = "config hr_dat_path" if hr_cfg else "checkpoint hr_dat"
