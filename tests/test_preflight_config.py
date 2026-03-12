@@ -1,5 +1,6 @@
-from pathlib import Path
 import json
+import os
+from pathlib import Path
 import sys
 import types
 
@@ -7,6 +8,12 @@ import click
 import pytest
 
 import wtec.cli as cli
+
+
+@pytest.fixture(autouse=True)
+def _isolate_wtec_state(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("WTEC_STATE_DIR", raising=False)
 
 
 def _write_init_state(home: Path) -> None:
@@ -371,6 +378,28 @@ def test_pes_reference_can_generate_from_mp_id(tmp_path, monkeypatch) -> None:
     assert out.exists()
     assert out_path == str(out.resolve())
     assert cfg["dft_pes_reference_structure_file"] == str(out.resolve())
+
+
+def test_load_runtime_dotenv_preserves_process_env(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "proj"
+    project_root.mkdir()
+    cfg_dir = project_root / "configs"
+    cfg_dir.mkdir()
+    cfg_path = cfg_dir / "run.json"
+    cfg_path.write_text("{}", encoding="utf-8")
+    (project_root / ".env").write_text(
+        "MP_API_KEY=\nTOPOSLAB_CLUSTER_HOST=dotenv-host\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.chdir(project_root)
+    monkeypatch.setenv("MP_API_KEY", "shell-key")
+    monkeypatch.delenv("TOPOSLAB_CLUSTER_HOST", raising=False)
+
+    cli._load_runtime_dotenv(str(cfg_path))
+
+    assert os.environ["MP_API_KEY"] == "shell-key"
+    assert os.environ["TOPOSLAB_CLUSTER_HOST"] == "dotenv-host"
 
 
 def test_preflight_dual_family_accepts_vasp_and_abacus_engines(tmp_path, monkeypatch) -> None:

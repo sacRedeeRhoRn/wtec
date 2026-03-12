@@ -6255,10 +6255,19 @@ def _load_runtime_dotenv(config_file: str | None) -> None:
     except Exception:
         return
 
+    # Preserve shell-provided variables so project .env files fill gaps without
+    # clobbering one-off secrets injected for the current process.
+    protected_env = {key: val for key, val in os.environ.items() if isinstance(val, str) and val}
+
+    def _load_env_file(env_path: str | Path) -> None:
+        load_dotenv(env_path, override=True)
+        for key, val in protected_env.items():
+            os.environ[key] = val
+
     loaded: set[str] = set()
     found_cwd = find_dotenv(usecwd=True)
     if found_cwd:
-        load_dotenv(found_cwd, override=True)
+        _load_env_file(found_cwd)
         loaded.add(str(Path(found_cwd).resolve()))
 
     if config_file:
@@ -6270,7 +6279,7 @@ def _load_runtime_dotenv(config_file: str | None) -> None:
             key = str(env_path)
             if key in loaded:
                 break
-            load_dotenv(env_path, override=True)
+            _load_env_file(env_path)
             break
 
 
