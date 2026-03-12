@@ -80,7 +80,7 @@ class TopologyPipeline:
             "w0_only": True,
             "transport_axis_primary": "x",
             "transport_axis_aux": "z",
-            "n_layers_y": 4,
+            "n_layers_y": 16,
             "n_layers_x": 4,
             "coarse_kmesh": [20, 20, 20],
             "refine_kmesh": [5, 5, 5],
@@ -89,12 +89,26 @@ class TopologyPipeline:
             "score": {"w_topo": 0.70, "w_transport": 0.30},
             "variant_discovery_glob": "slab_outputs/**/*.generated.meta.json",
             "fermi_ev": None,
-            "arc_engine": "siesta_slab_ldos",
+            "arc_engine": "hybrid_adaptive",
             "arc_allow_proxy_fallback": False,
             "arc_kmesh_xy": [8, 8],
             "arc_broadening_ev": 0.06,
             "node_method": "wannierberri_flux",
             "siesta_slab_ldos_autogen": "tb_kresolved",
+            "adaptive_k": {
+                "enabled": True,
+                "surface_axis": "z",
+                "global_kmesh_xy": [16, 16],
+                "local_kmesh_xy": [48, 48],
+                "fallback_global_refine_kmesh_xy": [40, 40],
+                "window_radius_frac_xy": [0.06, 0.06],
+                "energy_window_ev": 0.12,
+                "hotspot_gap_max_ev": 0.03,
+                "max_hotspots": 8,
+                "min_hotspots": 4,
+                "dedup_radius_frac": 0.03,
+                "require_inplane_transport": True,
+            },
             "hr_scope": "per_variant",
             "caveat_reuse_global_hr_dat": False,
             "delta_h_artifact_path": None,
@@ -121,7 +135,7 @@ class TopologyPipeline:
                 "always_include_pristine": True,
                 "selection_metric": "S_total",
                 "screen": {
-                    "arc_engine": "siesta_slab_ldos",
+                    "arc_engine": "hybrid_adaptive",
                     "node_method": "wannierberri_flux",
                     "coarse_kmesh": [10, 10, 10],
                     "refine_kmesh": [3, 3, 3],
@@ -170,7 +184,7 @@ class TopologyPipeline:
             "always_include_pristine": True,
             "selection_metric": "S_total",
             "screen": {
-                "arc_engine": "siesta_slab_ldos",
+                "arc_engine": "hybrid_adaptive",
                 "node_method": "wannierberri_flux",
                 "coarse_kmesh": [10, 10, 10],
                 "refine_kmesh": [3, 3, 3],
@@ -187,6 +201,25 @@ class TopologyPipeline:
         screen_default.update(screen)
         merged_tiering["screen"] = screen_default
         out["tiering"] = merged_tiering
+        adaptive = out.get("adaptive_k", {})
+        if not isinstance(adaptive, dict):
+            adaptive = {}
+        adaptive_default = {
+            "enabled": True,
+            "surface_axis": "z",
+            "global_kmesh_xy": [16, 16],
+            "local_kmesh_xy": [48, 48],
+            "fallback_global_refine_kmesh_xy": [40, 40],
+            "window_radius_frac_xy": [0.06, 0.06],
+            "energy_window_ev": 0.12,
+            "hotspot_gap_max_ev": 0.03,
+            "max_hotspots": 8,
+            "min_hotspots": 4,
+            "dedup_radius_frac": 0.03,
+            "require_inplane_transport": True,
+        }
+        adaptive_default.update(adaptive)
+        out["adaptive_k"] = adaptive_default
         out["siesta_slab_ldos_autogen"] = (
             str(out.get("siesta_slab_ldos_autogen", "tb_kresolved")).strip().lower()
             or "tb_kresolved"
@@ -415,7 +448,6 @@ class TopologyPipeline:
             from wtec.abacus.parser import parse_fermi_energy
             from wtec.abacus.runner import AbacusPipeline as PipelineClass
 
-        cluster_cfg = ClusterConfig.from_env()
         run_name = str(self.cfg.get("name", "run")).strip() or "run"
         hr_grid = topo_cfg.get("hr_grid", {}) if isinstance(topo_cfg.get("hr_grid"), dict) else {}
         reuse_ok = bool(hr_grid.get("reuse_successful_points", True))
@@ -428,7 +460,7 @@ class TopologyPipeline:
         except Exception:
             material_class = "generic"
 
-        if reuse_global_hr:
+        if reuse_global_hr or self._can_reuse_configured_hr_for_current_structure(rows):
             global_hr = str(self.hr_dat_path.resolve())
             global_win_path = self.hr_dat_path.with_name(f"{self.cfg.get('material', 'material')}.win")
             global_win = str(global_win_path.resolve()) if global_win_path.exists() else None
@@ -436,10 +468,16 @@ class TopologyPipeline:
                 if str(row.get("status")) == "failed":
                     continue
                 row["status"] = "ready"
-                row["reason"] = "caveat_reuse_global_hr_dat"
+                row["reason"] = (
+                    "caveat_reuse_global_hr_dat"
+                    if reuse_global_hr
+                    else "configured_hr_dat_path"
+                )
                 row["hr_dat_path"] = global_hr
                 row["win_path"] = global_win
             return rows
+
+        cluster_cfg = ClusterConfig.from_env()
 
         rows_to_run: list[dict[str, Any]] = []
         for row in rows:
@@ -549,11 +587,14 @@ class TopologyPipeline:
                         atoms,
                         self.cfg["material"],
                         jm,
-                        pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cluster_cfg.siesta_pseudo_dir),
+                        pseudo_dir=cluster_cfg.resolved_siesta_pseudo_dir(
+                            spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                            explicit=str(siesta_cfg.get("pseudo_dir", "")).strip(),
+                        ),
                         basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
                         wannier_interface=str(siesta_cfg.get("wannier_interface", "sisl")).strip().lower(),
                         spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
-                        include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                        include_pao_basis=bool(siesta_cfg.get("include_pao_basis", False)),
                         mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
                         mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
                         mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
@@ -640,6 +681,24 @@ class TopologyPipeline:
                     row["status"] = "failed"
                     row["reason"] = "aborted_due_to_previous_variant_dft_failure"
         return rows
+
+    def _can_reuse_configured_hr_for_current_structure(
+        self,
+        rows: list[dict[str, Any]],
+    ) -> bool:
+        if not self.cfg.get("hr_dat_path"):
+            return False
+        saw_row = False
+        for row in rows:
+            if str(row.get("status")) == "failed":
+                continue
+            saw_row = True
+            if not bool(row.get("is_pristine", False)):
+                return False
+            variant_id = str(row.get("variant_id", "")).strip().lower()
+            if variant_id not in {"current_structure", "pristine", "reference"}:
+                return False
+        return saw_row
 
     @staticmethod
     def _propagate_variant_hr_rows(
@@ -764,8 +823,8 @@ class TopologyPipeline:
         rows: list[dict[str, Any]],
         topo_cfg: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Ensure per-point slab-LDOS payloads exist for siesta_slab_ldos arc mode."""
-        arc_engine = str(topo_cfg.get("arc_engine", "siesta_slab_ldos")).strip().lower()
+        """Ensure per-point slab-LDOS payloads exist for explicit slab-LDOS arc mode."""
+        arc_engine = str(topo_cfg.get("arc_engine", "hybrid_adaptive")).strip().lower()
         if arc_engine != "siesta_slab_ldos":
             return rows
 
@@ -873,7 +932,7 @@ class TopologyPipeline:
             payload = {
                 "metric": float(np.clip(metric, 0.0, 1.0)),
                 "surface_fraction": float(np.clip(metric, 0.0, 1.0)),
-                "source_engine": str(arc.get("engine", arc_prefer_engine)),
+                "source_engine": str(arc.get("source_engine", arc.get("engine", arc_prefer_engine))),
                 "source_kind": source_kind,
                 "generated_by": "wtec.topology_pipeline",
                 "point_name": str(row.get("point_name", "")),
@@ -985,8 +1044,13 @@ class TopologyPipeline:
                     "gap_threshold_ev": float(topo_cfg.get("gap_threshold_ev", 0.05)),
                     "max_candidates": int(topo_cfg.get("max_candidates", 64)),
                     "dedup_tol": float(topo_cfg.get("dedup_tol", 0.04)),
-                    "arc_engine": str(topo_cfg.get("arc_engine", "siesta_slab_ldos")),
+                    "arc_engine": str(topo_cfg.get("arc_engine", "hybrid_adaptive")),
                     "node_method": str(topo_cfg.get("node_method", "wannierberri_flux")),
+                    "adaptive_k": (
+                        dict(topo_cfg.get("adaptive_k", {}))
+                        if isinstance(topo_cfg.get("adaptive_k"), dict)
+                        else None
+                    ),
                     "reference_bands_path": topo_cfg.get("reference_bands_path"),
                     "reference_tol_ev": float(topo_cfg.get("reference_tol_ev", 0.20)),
                     "metadata_path": row.get("metadata_path"),
@@ -999,7 +1063,7 @@ class TopologyPipeline:
                     "arc_kmesh_xy": [int(v) for v in topo_cfg.get("arc_kmesh_xy", [8, 8])],
                     "arc_broadening_ev": float(topo_cfg.get("arc_broadening_ev", 0.06)),
                     "transport_probe_enabled": bool(
-                        (topo_cfg.get("transport_probe", {}) or {}).get("enabled", True)
+                        (topo_cfg.get("transport_probe", {}) or {}).get("enabled", False)
                     ),
                     "transport_probe_n_ensemble": int(
                         (topo_cfg.get("transport_probe", {}) or {}).get("n_ensemble", 1)
@@ -1089,7 +1153,7 @@ class TopologyPipeline:
         if not isinstance(screen, dict):
             screen = {}
         out["screen"] = {
-            "arc_engine": str(screen.get("arc_engine", "siesta_slab_ldos")).strip().lower() or "siesta_slab_ldos",
+            "arc_engine": str(screen.get("arc_engine", "hybrid_adaptive")).strip().lower() or "hybrid_adaptive",
             "node_method": str(screen.get("node_method", "wannierberri_flux")).strip().lower() or "wannierberri_flux",
             "coarse_kmesh": screen.get("coarse_kmesh", [10, 10, 10]),
             "refine_kmesh": screen.get("refine_kmesh", [3, 3, 3]),
@@ -1166,14 +1230,23 @@ class TopologyPipeline:
         return selected
 
     @staticmethod
-    def _thread_exports(command: str, *, threads: int) -> str:
+    def _thread_exports(
+        command: str,
+        *,
+        threads: int,
+        full_node_threading: bool = False,
+    ) -> str:
         t = max(1, int(threads))
         exports = (
             f"export OMP_NUM_THREADS={t}; "
             f"export MKL_NUM_THREADS={t}; "
             f"export OPENBLAS_NUM_THREADS={t}; "
             f"export NUMEXPR_NUM_THREADS={t}; "
+            f"export OMP_PROC_BIND=spread; "
+            f"export OMP_PLACES=cores; "
         )
+        if full_node_threading:
+            exports += "export I_MPI_PIN=0; "
         return exports + command
 
     @staticmethod
@@ -1275,6 +1348,8 @@ class TopologyPipeline:
                     job_name=f"topo_{run_name}"[:15],
                     n_nodes=n_nodes,
                     n_cores_per_node=cores_per_node,
+                    mpi_procs_per_node=max(1, int(total_cores // max(1, n_nodes))),
+                    omp_threads=1,
                     walltime=str(topo_cfg.get("walltime", "01:00:00")),
                     queue=queue_used,
                     work_dir=remote_dir,
@@ -1449,8 +1524,11 @@ class TopologyPipeline:
             task_payload["hr_dat_path"] = str(shared.get("hr") or Path(str(task["hr_dat_path"])).name)
             if task.get("win_path"):
                 task_payload["win_path"] = str(shared.get("win") or Path(str(task["win_path"])).name)
-            if task.get("siesta_slab_ldos_json") and shared.get("siesta_slab_ldos_json"):
-                task_payload["siesta_slab_ldos_json"] = str(shared.get("siesta_slab_ldos_json"))
+            if task.get("siesta_slab_ldos_json"):
+                if shared.get("siesta_slab_ldos_json"):
+                    task_payload["siesta_slab_ldos_json"] = str(shared.get("siesta_slab_ldos_json"))
+                else:
+                    task_payload["siesta_slab_ldos_json"] = None
 
             task_file = local_point / "task.json"
             task_file.write_text(json.dumps({"tasks": [task_payload]}, indent=2))
@@ -1460,18 +1538,40 @@ class TopologyPipeline:
             worker_python = (
                 f"env PYTHONPATH=$PWD/{worker_zip_shared}:$PYTHONPATH {python_exe}"
             )
+            node_threaded_single_rank = (
+                int(prof["node_phase_mpi_np"]) == 1 and int(prof["node_phase_threads"]) > 1
+            )
+            arc_threaded_single_rank = (
+                int(prof["arc_phase_mpi_np"]) == 1 and int(prof["arc_phase_threads"]) > 1
+            )
             node_cmd = build_command(
                 worker_python,
-                mpi=MPIConfig(n_cores=prof["node_phase_mpi_np"], n_pool=1),
+                mpi=MPIConfig(
+                    n_cores=prof["node_phase_mpi_np"],
+                    n_pool=1,
+                    bind_to="none" if node_threaded_single_rank else "core",
+                ),
                 extra_args=f"-m wtec.topology.worker {task_file.name} {node_result_name} node",
             )
             arc_cmd = build_command(
                 worker_python,
-                mpi=MPIConfig(n_cores=prof["arc_phase_mpi_np"], n_pool=1),
+                mpi=MPIConfig(
+                    n_cores=prof["arc_phase_mpi_np"],
+                    n_pool=1,
+                    bind_to="none" if arc_threaded_single_rank else "core",
+                ),
                 extra_args=f"-m wtec.topology.worker {task_file.name} {arc_result_name} arc",
             )
-            node_cmd = self._thread_exports(node_cmd, threads=prof["node_phase_threads"])
-            arc_cmd = self._thread_exports(arc_cmd, threads=prof["arc_phase_threads"])
+            node_cmd = self._thread_exports(
+                node_cmd,
+                threads=prof["node_phase_threads"],
+                full_node_threading=node_threaded_single_rank,
+            )
+            arc_cmd = self._thread_exports(
+                arc_cmd,
+                threads=prof["arc_phase_threads"],
+                full_node_threading=arc_threaded_single_rank,
+            )
 
             prep_cmds = [
                 f"cp -f {shlex.quote(remote_shared_dir.rstrip('/') + '/' + worker_zip_shared)} ./",
@@ -1492,6 +1592,8 @@ class TopologyPipeline:
                     job_name=f"tp{task_index:03d}_{run_name}"[:15],
                     n_nodes=n_nodes,
                     n_cores_per_node=cores_per_node,
+                    mpi_procs_per_node=max(1, int(prof["node_phase_mpi_np"] // max(1, n_nodes))),
+                    omp_threads=1,
                     walltime=point_walltime,
                     queue=queue_used,
                     work_dir=remote_dir,

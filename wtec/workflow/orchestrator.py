@@ -5,8 +5,10 @@ States: INIT → STRUCTURE → DFT_SCF → DFT_NSCF → WANNIER90 → TRANSPORT 
 
 from __future__ import annotations
 
+from collections import Counter
 import hashlib
 import json
+import os
 import time
 from pathlib import Path
 import shlex
@@ -14,6 +16,20 @@ import zipfile
 from typing import Any
 
 import numpy as np
+
+from wtec.rgf import (
+    canonicalize_rgf_inputs,
+    normalize_axis,
+    normalize_rgf_blas_backend,
+    normalize_rgf_mode,
+    normalize_rgf_parallel_policy,
+    normalize_rgf_validate_against,
+    normalize_transport_engine,
+    plan_execution as rgf_plan_execution,
+    phase1_alignment_issues as rgf_phase1_alignment_issues,
+    preflight_summary as rgf_preflight_summary,
+    resolve_transport_engine,
+)
 
 
 STAGES = [
@@ -26,6 +42,39 @@ STAGES = [
     "ANALYSIS",
     "DONE",
 ]
+
+
+def _wtec_state_dir() -> Path:
+    env_dir = os.environ.get("WTEC_STATE_DIR")
+    if isinstance(env_dir, str) and env_dir.strip():
+        return Path(env_dir).expanduser().resolve()
+    local_dir = (Path.cwd() / ".wtec").expanduser().resolve()
+    if local_dir.exists():
+        return local_dir
+    return (Path.home() / ".wtec").expanduser().resolve()
+
+
+def _jsonable(obj: Any) -> Any:
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, np.generic):
+        return obj.item()
+    return obj
+
+
+def _load_init_state() -> dict[str, Any]:
+    path = _wtec_state_dir() / "init_state.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text())
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 class TopoSlabWorkflow:
@@ -42,7 +91,7 @@ class TopoSlabWorkflow:
         self.jm = job_manager
         self._state: dict[str, Any] = {"stage": "INIT", "outputs": {}}
         self._checkpoint_file = checkpoint_file or (
-            Path.home() / ".wtec" / "checkpoints" / f"{config.get('name', 'run')}.json"
+            _wtec_state_dir() / "checkpoints" / f"{config.get('name', 'run')}.json"
         )
 
     # ── constructors ─────────────────────────────────────────────────────────
@@ -260,6 +309,18 @@ class TopoSlabWorkflow:
         if engine not in {"qe", "siesta", "vasp"}:
             raise ValueError(f"Unsupported dft_engine={engine!r}. Use 'qe', 'siesta', or 'vasp'.")
         return engine
+
+    def _transport_engine(self) -> str:
+        raw = self.cfg.get("transport_engine")
+        if raw is None and isinstance(self.cfg.get("transport"), dict):
+            raw = self.cfg["transport"].get("engine")
+        backend = str(self.cfg.get("transport_backend", "qsub")).strip().lower() or "qsub"
+        return resolve_transport_engine(
+            raw or "auto",
+            cfg=self.cfg,
+            init_state=_load_init_state(),
+            backend=backend,
+        )
 
     def _dft_reuse_mode(self) -> str:
         raw = self.cfg.get("dft_reuse_mode")
@@ -619,14 +680,19 @@ class TopoSlabWorkflow:
                 "stale_log_seconds": self.cfg.get("_runtime_stale_log_seconds", 300),
             }
             if engine == "qe":
+                custom_projections = self.cfg.get("wannier_custom_projections")
+                if custom_projections is not None and not isinstance(custom_projections, list):
+                    raise ValueError("wannier_custom_projections must be a list[str] when provided.")
+                qe_pseudo_dir = str(self.cfg.get("qe_pseudo_dir", "")).strip() or cfg.qe_pseudo_dir
                 pipeline = PipelineClass(
                     atoms_ref,
                     material,
                     jm,
-                    pseudo_dir=cfg.qe_pseudo_dir,
+                    pseudo_dir=qe_pseudo_dir,
                     qe_noncolin=self.cfg.get("qe_noncolin", True),
                     qe_lspinorb=self.cfg.get("qe_lspinorb", True),
                     qe_disable_symmetry=self.cfg.get("qe_disable_symmetry", False),
+                    custom_projections=custom_projections,
                     dispersion_cfg=self._dft_dispersion_cfg(),
                     **common_kwargs,
                 )
@@ -636,11 +702,14 @@ class TopoSlabWorkflow:
                     atoms_ref,
                     material,
                     jm,
-                    pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cfg.siesta_pseudo_dir),
+                    pseudo_dir=cfg.resolved_siesta_pseudo_dir(
+                        spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                        explicit=str(siesta_cfg.get("pseudo_dir", "")).strip(),
+                    ),
                     basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
                     wannier_interface=str(siesta_cfg.get("wannier_interface", "sisl")).strip().lower(),
                     spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
-                    include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                    include_pao_basis=bool(siesta_cfg.get("include_pao_basis", False)),
                     mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
                     mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
                     mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
@@ -794,14 +863,19 @@ class TopoSlabWorkflow:
             if engine == "qe":
                 from wtec.workflow.dft_pipeline import DFTPipeline as PipelineClass
 
+                custom_projections = self.cfg.get("wannier_custom_projections")
+                if custom_projections is not None and not isinstance(custom_projections, list):
+                    raise ValueError("wannier_custom_projections must be a list[str] when provided.")
+                qe_pseudo_dir = str(self.cfg.get("qe_pseudo_dir", "")).strip() or cfg.qe_pseudo_dir
                 pipeline = PipelineClass(
                     atoms_ref,
                     material,
                     jm,
-                    pseudo_dir=cfg.qe_pseudo_dir,
+                    pseudo_dir=qe_pseudo_dir,
                     qe_noncolin=self.cfg.get("qe_noncolin", True),
                     qe_lspinorb=self.cfg.get("qe_lspinorb", True),
                     qe_disable_symmetry=self.cfg.get("qe_disable_symmetry", False),
+                    custom_projections=custom_projections,
                     dispersion_cfg=self._dft_dispersion_cfg(),
                     **common_kwargs,
                 )
@@ -813,11 +887,14 @@ class TopoSlabWorkflow:
                     atoms_ref,
                     material,
                     jm,
-                    pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cfg.siesta_pseudo_dir),
+                    pseudo_dir=cfg.resolved_siesta_pseudo_dir(
+                        spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                        explicit=str(siesta_cfg.get("pseudo_dir", "")).strip(),
+                    ),
                     basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
                     wannier_interface=str(siesta_cfg.get("wannier_interface", "sisl")).strip().lower(),
                     spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
-                    include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                    include_pao_basis=bool(siesta_cfg.get("include_pao_basis", False)),
                     mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
                     mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
                     mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
@@ -873,8 +950,16 @@ class TopoSlabWorkflow:
 
     def _stage_transport(self, hr_dat: Path) -> dict:
         self._set_stage("TRANSPORT")
+        requested_engine_raw = self.cfg.get("transport_engine")
+        if requested_engine_raw is None and isinstance(self.cfg.get("transport"), dict):
+            requested_engine_raw = self.cfg["transport"].get("engine")
+        requested_engine = normalize_transport_engine(requested_engine_raw or "auto")
         cached = self._load_cached_transport_results()
         if cached is not None:
+            cached_meta = cached.setdefault("meta", {}) if isinstance(cached, dict) else {}
+            if isinstance(cached_meta, dict):
+                cached_meta.setdefault("transport_engine_requested", requested_engine)
+                cached_meta.setdefault("transport_engine_resolved", self._transport_engine())
             print(
                 "[Orchestrator] Reusing cached transport result: "
                 f"{self._transport_result_file()}"
@@ -889,8 +974,28 @@ class TopoSlabWorkflow:
             return cached
 
         backend = str(self.cfg.get("transport_backend", "qsub")).strip().lower()
+        engine = self._transport_engine()
         strict_qsub = bool(self.cfg.get("transport_strict_qsub", True))
         job_meta: dict[str, Any] | None = None
+
+        if engine == "rgf":
+            if backend != "qsub":
+                raise RuntimeError(
+                    "transport_engine='rgf' is currently executable only with "
+                    "transport.backend='qsub'."
+                )
+            results, job_meta = self._stage_transport_rgf_qsub(hr_dat, label="primary")
+            self._state["outputs"]["transport_results"] = "computed"
+            if job_meta is not None:
+                self._state["outputs"]["transport_job"] = job_meta
+                if job_meta.get("job_id"):
+                    self._state["last_job_id"] = job_meta.get("job_id")
+            meta_payload = results.setdefault("meta", {}) if isinstance(results, dict) else {}
+            if isinstance(meta_payload, dict):
+                meta_payload["transport_engine_requested"] = requested_engine
+                meta_payload["transport_engine_resolved"] = engine
+            self._save_checkpoint()
+            return results
 
         if backend == "qsub":
             try:
@@ -921,12 +1026,21 @@ class TopoSlabWorkflow:
             self._state["outputs"]["transport_job"] = job_meta
             if job_meta.get("job_id"):
                 self._state["last_job_id"] = job_meta.get("job_id")
+        meta_payload = results.setdefault("meta", {}) if isinstance(results, dict) else {}
+        if isinstance(meta_payload, dict):
+            meta_payload["transport_engine_requested"] = requested_engine
+            meta_payload["transport_engine_resolved"] = engine
         self._save_checkpoint()
         return results
 
     def _stage_transport_local(self, hr_dat: Path, *, label: str = "primary") -> dict:
         from wtec.workflow.transport_pipeline import TransportPipeline
 
+        engine = self._transport_engine()
+        if engine != "kwant":
+            raise ValueError(
+                f"Unsupported local transport engine={engine!r}. Use 'kwant' or 'auto'."
+            )
         tp = TransportPipeline(
             hr_dat,
             thicknesses=self.cfg.get("thicknesses"),
@@ -944,13 +1058,16 @@ class TopoSlabWorkflow:
             n_layers_y=self.cfg.get("transport_n_layers_y", 4),
             carrier_density_m3=self.cfg.get("carrier_density_m3"),
             fermi_velocity_m_per_s=self.cfg.get("fermi_velocity_m_per_s"),
+            transport_engine=engine,
         )
         results = tp.run_full()
         run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
         out_dir = run_dir / "transport" / str(label)
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "transport_result.json"
-        out_path.write_text(json.dumps({"transport_results": results}, indent=2))
+        out_path.write_text(
+            json.dumps({"transport_results": _jsonable(results)}, indent=2)
+        )
         return results
 
     def _stage_transport_qsub(self, hr_dat: Path, *, label: str = "primary") -> tuple[dict, dict]:
@@ -998,9 +1115,18 @@ class TopoSlabWorkflow:
                 logging_cfg.get("retrieve_on_failure", True),
             )
         )
+        transport_engine = self._transport_engine()
+        if transport_engine != "kwant":
+            raise RuntimeError(
+                f"Unsupported qsub transport engine={transport_engine!r}. "
+                "Only kwant-backed transport is executable right now."
+            )
         require_mumps = bool(self.cfg.get("transport_require_mumps", True))
         kwant_mode = str(self.cfg.get("transport_kwant_mode", "auto")).strip().lower() or "auto"
         kwant_task_workers = int(self.cfg.get("transport_kwant_task_workers", 0))
+        mumps_nrhs = self.cfg.get("transport_mumps_nrhs")
+        mumps_ordering = self.cfg.get("transport_mumps_ordering")
+        mumps_sparse_rhs = self.cfg.get("transport_mumps_sparse_rhs")
         payload = {
             "hr_dat_path": hr_dat.name,
             "win_path": win_path.name if win_path.exists() else None,
@@ -1023,9 +1149,17 @@ class TopoSlabWorkflow:
             "runtime_cert_file": cert_name,
             "logging_detail": runtime_log_detail,
             "heartbeat_seconds": max(5, runtime_heartbeat),
+            "transport_engine": transport_engine,
             "require_mumps": require_mumps,
             "kwant_mode": kwant_mode,
             "kwant_task_workers": max(0, kwant_task_workers),
+            "mumps_nrhs": (int(mumps_nrhs) if mumps_nrhs is not None else None),
+            "mumps_ordering": (
+                str(mumps_ordering).strip() if mumps_ordering is not None else None
+            ),
+            "mumps_sparse_rhs": (
+                bool(mumps_sparse_rhs) if mumps_sparse_rhs is not None else None
+            ),
         }
 
         worker_zip = self._worker_source_zip(transport_dir)
@@ -1104,6 +1238,7 @@ class TopoSlabWorkflow:
                 "total_cores": int(total_cores),
                 "expected_mpi_np": int(mpi_np),
                 "expected_threads": int(threads),
+                "transport_engine": transport_engine,
                 "kwant_enforce_1x64": bool(enforce_1x64),
                 "require_mumps": bool(require_mumps),
                 "kwant_mode": kwant_mode,
@@ -1116,18 +1251,29 @@ class TopoSlabWorkflow:
             worker_python = (
                 f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}"
             )
+            threaded_single_rank = int(mpi_np) == 1 and int(threads) > 1
             cmd = build_command(
                 worker_python,
-                mpi=MPIConfig(n_cores=mpi_np, n_pool=1),
+                mpi=MPIConfig(
+                    n_cores=mpi_np,
+                    n_pool=1,
+                    bind_to="none" if threaded_single_rank else "core",
+                ),
                 extra_args=f"-m wtec.workflow.transport_worker {payload_name} {result_name}",
             )
-            cmd = self._thread_exports(cmd, threads=threads)
+            cmd = self._thread_exports(
+                cmd,
+                threads=threads,
+                full_node_threading=threaded_single_rank,
+            )
             job_name = f"tr_{str(label)[:5]}_{run_name}"[:15]
             script = generate_script(
                 PBSJobConfig(
                     job_name=job_name,
                     n_nodes=n_nodes,
                     n_cores_per_node=cores_per_node,
+                    mpi_procs_per_node=max(1, int(mpi_np // max(1, n_nodes))),
+                    omp_threads=max(1, int(threads)),
                     walltime=walltime,
                     queue=queue_used,
                     work_dir=remote_dir,
@@ -1169,15 +1315,404 @@ class TopoSlabWorkflow:
             raise RuntimeError("Invalid transport worker result payload.")
         return self._normalize_transport_results(results), meta
 
+    def _stage_transport_rgf_qsub(self, hr_dat: Path, *, label: str = "primary") -> tuple[dict, dict]:
+        from wtec.cluster.mpi import MPIConfig, build_command
+        from wtec.cluster.pbs import PBSJobConfig, generate_script
+        from wtec.cluster.ssh import open_ssh
+        from wtec.cluster.submit import JobManager
+        from wtec.config.cluster import ClusterConfig
+        from wtec.transport.rgf_postprocess import (
+            convert_rgf_raw_to_transport_results,
+            load_rgf_raw_result,
+        )
+
+        cfg = ClusterConfig.from_env()
+        init_state = _load_init_state()
+        rgf_cluster = (
+            init_state.get("rgf", {}).get("cluster", {})
+            if isinstance(init_state.get("rgf"), dict)
+            else {}
+        )
+        if not isinstance(rgf_cluster, dict) or not bool(rgf_cluster.get("ready")):
+            raise RuntimeError(
+                "RGF cluster router is not ready. Re-run `wtec init` first."
+            )
+        rgf_binary = str(rgf_cluster.get("binary_path") or "").strip()
+        if not rgf_binary:
+            raise RuntimeError(
+                "RGF cluster router state is missing binary_path. Re-run `wtec init`."
+            )
+
+        run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
+        transport_dir = run_dir / "transport" / str(label)
+        transport_dir.mkdir(parents=True, exist_ok=True)
+        logging_cfg = self.cfg.get("logging", {})
+        if not isinstance(logging_cfg, dict):
+            logging_cfg = {}
+        runtime_log_detail = str(
+            self.cfg.get(
+                "runtime_logging_detail",
+                logging_cfg.get("detail", "per_ensemble"),
+            )
+        ).strip().lower() or "per_ensemble"
+        runtime_heartbeat = int(
+            self.cfg.get(
+                "runtime_logging_heartbeat_seconds",
+                logging_cfg.get("heartbeat_seconds", 20),
+            )
+        )
+        stream_from_start = bool(
+            self.cfg.get(
+                "runtime_stream_from_start",
+                logging_cfg.get("stream_from_start", True),
+            )
+        )
+        retrieve_on_failure = bool(
+            self.cfg.get(
+                "runtime_retrieve_on_failure",
+                logging_cfg.get("retrieve_on_failure", True),
+            )
+        )
+
+        payload_name = "transport_payload.json"
+        raw_result_name = "transport_rgf_raw.json"
+        result_name = "transport_result.json"
+        cert_name = "transport_runtime_cert.json"
+        progress_name = "transport_progress.jsonl"
+        payload_path = transport_dir / payload_name
+        raw_result_path = transport_dir / raw_result_name
+        final_result_path = transport_dir / result_name
+        cert_path = transport_dir / cert_name
+        win_path = hr_dat.with_name(f"{self.cfg.get('material', 'material')}.win")
+
+        thicknesses_raw = self.cfg.get("thicknesses")
+        if thicknesses_raw is None:
+            thicknesses_raw = list(range(2, 32, 2))
+        disorder_raw = self.cfg.get("disorder_strengths")
+        if disorder_raw is None:
+            disorder_raw = [0.0]
+        mfp_lengths_raw = self.cfg.get("mfp_lengths")
+        if mfp_lengths_raw is None:
+            mfp_lengths_raw = list(range(5, 105, 5))
+        thicknesses = [int(v) for v in thicknesses_raw]
+        disorder_strengths = [float(v) for v in disorder_raw]
+        mfp_lengths = [int(v) for v in mfp_lengths_raw]
+        lead_axis = normalize_axis(self.cfg.get("transport_axis", "x"), field_name="transport_axis")
+        thickness_axis = normalize_axis(
+            self.cfg.get("thickness_axis", "z"),
+            field_name="thickness_axis",
+        )
+        rgf_mode = normalize_rgf_mode(self.cfg.get("transport_rgf_mode", "periodic_transverse"))
+        rgf_periodic_axis = normalize_axis(
+            self.cfg.get("transport_rgf_periodic_axis", "y"),
+            field_name="transport_rgf_periodic_axis",
+        )
+        mfp_n_layers_z = int(self.cfg.get("mfp_n_layers_z", 10))
+        n_layers_x = int(self.cfg.get("transport_n_layers_x", 4))
+        n_layers_y = int(self.cfg.get("transport_n_layers_y", 4))
+        sigma_backend = str(
+            self.cfg.get("transport_rgf_full_finite_sigma_backend", "native")
+        ).strip().lower() or "native"
+        rgf_parallel_policy = normalize_rgf_parallel_policy(
+            self.cfg.get("transport_rgf_parallel_policy", "auto")
+        )
+        rgf_threads_per_rank_raw = self.cfg.get(
+            "transport_rgf_threads_per_rank",
+            self.cfg.get("transport_threads", 0),
+        )
+        if isinstance(rgf_threads_per_rank_raw, str) and rgf_threads_per_rank_raw.strip().lower() == "auto":
+            rgf_threads_per_rank: int | str = "auto"
+        else:
+            rgf_threads_per_rank = int(rgf_threads_per_rank_raw or 0)
+        rgf_blas_backend = normalize_rgf_blas_backend(
+            self.cfg.get("transport_rgf_blas_backend", "auto")
+        )
+        rgf_validate_against_raw = self.cfg.get("transport_rgf_validate_against")
+        if rgf_validate_against_raw is None:
+            rgf_validate_against_raw = "kwant" if sigma_backend == "kwant_exact" else "none"
+        rgf_validate_against = normalize_rgf_validate_against(rgf_validate_against_raw)
+        canonical_input = canonicalize_rgf_inputs(
+            hr_dat_path=hr_dat,
+            win_path=(win_path if win_path.exists() else None),
+            lead_axis=lead_axis,
+            thickness_axis=thickness_axis,
+            mode=rgf_mode,
+            periodic_axis=rgf_periodic_axis,
+            out_dir=transport_dir / "canonical_rgf",
+            seedname=f"{str(label)}_rgf",
+        )
+        canonical_hr_path = Path(canonical_input.hr_dat_path)
+        canonical_win_path = (
+            Path(canonical_input.win_path)
+            if canonical_input.win_path is not None
+            else None
+        )
+
+        payload = {
+            "hr_dat_path": canonical_hr_path.name,
+            "win_path": canonical_win_path.name if canonical_win_path is not None else None,
+            "queue": "",
+            "thicknesses": thicknesses,
+            "disorder_strengths": disorder_strengths,
+            "n_ensemble": int(self.cfg.get("n_ensemble", 1)),
+            "base_seed": int(self.cfg.get("base_seed", 0)),
+            "energy": float(self.cfg.get("fermi_shift_eV", 0.0)),
+            "eta": float(self.cfg.get("transport_rgf_eta", 1.0e-6)),
+            "mfp_n_layers_z": mfp_n_layers_z,
+            "mfp_lengths": mfp_lengths,
+            "lead_axis": "x",
+            "thickness_axis": "z",
+            "n_layers_x": n_layers_x,
+            "n_layers_y": n_layers_y,
+            "transport_engine": "rgf",
+            "transport_rgf_mode": rgf_mode,
+            "transport_rgf_periodic_axis": "y",
+            "parallel_policy": rgf_parallel_policy,
+            "blas_backend_requested": rgf_blas_backend,
+            "validate_against": rgf_validate_against,
+            "canonicalized_input": bool(canonical_input.was_canonicalized),
+            "original_lead_axis": lead_axis,
+            "original_thickness_axis": thickness_axis,
+            "original_periodic_axis": rgf_periodic_axis,
+            "axis_permutation": list(canonical_input.permutation),
+            "progress_file": progress_name,
+            "logging_detail": runtime_log_detail,
+            "heartbeat_seconds": max(5, runtime_heartbeat),
+        }
+
+        stage_files: list[Path] = [payload_path, canonical_hr_path]
+        if canonical_win_path is not None and canonical_win_path.exists():
+            stage_files.append(canonical_win_path)
+
+        run_name = str(self.cfg.get("name", "run")).strip() or "run"
+        remote_dir = f"{self._remote_run_base(cfg)}/transport/{str(label)}"
+        walltime = str(self.cfg.get("transport_walltime", "01:00:00"))
+
+        with open_ssh(cfg) as ssh:
+            jm = JobManager(ssh)
+            queue_used = jm.resolve_queue(
+                cfg.pbs_queue,
+                fallback_order=cfg.pbs_queue_priority,
+            )
+            payload["queue"] = queue_used
+            n_nodes = int(self.cfg.get("n_nodes", 1))
+            cores_per_node = cfg.cores_for_queue(queue_used)
+            total_cores = max(1, n_nodes * cores_per_node)
+            probe_nz = max([mfp_n_layers_z, *thicknesses])
+            rgf_summary = rgf_preflight_summary(
+                hr_dat_path=canonical_hr_path,
+                lead_axis="x",
+                n_layers_x=n_layers_x,
+                n_layers_y=n_layers_y,
+                n_layers_z=probe_nz,
+                mode=rgf_mode,
+                periodic_axis="y",
+                thicknesses=thicknesses,
+                mfp_lengths=mfp_lengths,
+                disorder_strengths=disorder_strengths,
+                n_ensemble=int(self.cfg.get("n_ensemble", 1)),
+                queue_cores=total_cores,
+            )
+            alignment_issues = (
+                rgf_phase1_alignment_issues(
+                    hr_dat_path=canonical_hr_path,
+                    lead_axis="x",
+                    n_layers_x=n_layers_x,
+                    n_layers_y=n_layers_y,
+                    thicknesses=thicknesses,
+                    mfp_n_layers_z=mfp_n_layers_z,
+                    mfp_lengths=mfp_lengths,
+                    mode=rgf_mode,
+                    periodic_axis="y",
+                )
+                if rgf_mode == "periodic_transverse"
+                else []
+            )
+            if alignment_issues:
+                raise RuntimeError(
+                    "Current native RGF phase requires full principal layers for every transport task.\n"
+                    + "\n".join(alignment_issues)
+                )
+            execution_plan = rgf_plan_execution(
+                mode=rgf_mode,
+                queue_cores=total_cores,
+                safe_rank_cap=int(rgf_summary.safe_rank_cap),
+                n_work_units=int(rgf_summary.transport_task_count),
+                requested_mpi_np=int(self.cfg.get("transport_mpi_np", 0)),
+                requested_threads_per_rank=rgf_threads_per_rank,
+                parallel_policy=rgf_parallel_policy,
+            )
+            mpi_np = int(execution_plan.mpi_np)
+            mpi_ppn = max(1, min(cores_per_node, (mpi_np + n_nodes - 1) // max(1, n_nodes)))
+            max_threads_per_rank = max(1, cores_per_node // max(1, mpi_ppn))
+            omp_threads = min(max_threads_per_rank, int(execution_plan.omp_threads))
+            payload["expected_mpi_np"] = mpi_np
+            payload["expected_omp_threads"] = int(omp_threads)
+            payload["parallel_policy_resolved"] = str(execution_plan.parallel_policy)
+            payload["task_shape"] = _jsonable(rgf_summary.task_shape)
+            payload_path.write_text(json.dumps(payload, indent=2))
+
+            rc, _, _ = ssh.run(f"test -x {shlex.quote(rgf_binary)}", check=False)
+            if rc != 0:
+                raise RuntimeError(
+                    f"Prepared RGF binary is not executable on cluster: {rgf_binary}"
+                )
+            jm.ensure_remote_commands(["mpirun"], modules=cfg.modules, bin_dirs=cfg.bin_dirs)
+
+            cmd = build_command(
+                shlex.quote(rgf_binary),
+                mpi=MPIConfig(
+                    n_cores=mpi_np,
+                    bind_to=("none" if mpi_np == 1 else "core"),
+                ),
+                extra_args=f"{shlex.quote(payload_name)} {shlex.quote(raw_result_name)}",
+            )
+            cmd = self._thread_exports(
+                cmd,
+                threads=int(omp_threads),
+                full_node_threading=bool(mpi_np == 1),
+            )
+            job_name = f"rgf_{str(label)[:5]}_{run_name}"[:15]
+            script = generate_script(
+                PBSJobConfig(
+                    job_name=job_name,
+                    n_nodes=n_nodes,
+                    n_cores_per_node=cores_per_node,
+                    mpi_procs_per_node=mpi_ppn,
+                    omp_threads=int(omp_threads),
+                    walltime=walltime,
+                    queue=queue_used,
+                    work_dir=remote_dir,
+                    modules=cfg.modules,
+                    env_vars={},
+                ),
+                [cmd],
+            )
+            local_script_path = transport_dir / f"transport_rgf_{str(label)}.pbs"
+            local_script_path.write_text(script)
+
+            meta = jm.submit_and_wait(
+                script,
+                remote_dir=remote_dir,
+                local_dir=transport_dir,
+                retrieve_patterns=[
+                    raw_result_name,
+                    progress_name,
+                    "wtec_job.log",
+                    f"{job_name}.log",
+                    "*.out",
+                ],
+                script_name=f"transport_rgf_{str(label)}.pbs",
+                stage_files=stage_files,
+                expected_local_outputs=[raw_result_name],
+                queue_used=queue_used,
+                poll_interval=int(self.cfg.get("_runtime_log_poll_interval", 5)),
+                live_log=bool(self.cfg.get("_runtime_live_log", True)),
+                live_files=["wtec_job.log", f"{job_name}.log", progress_name, raw_result_name],
+                stale_log_seconds=int(self.cfg.get("_runtime_stale_log_seconds", 300)),
+                retrieve_on_failure=retrieve_on_failure,
+                stream_from_start=stream_from_start,
+            )
+
+        raw_payload, runtime_cert = load_rgf_raw_result(raw_result_path)
+        runtime_cert = dict(runtime_cert)
+        build_probe = rgf_cluster.get("probe", {}) if isinstance(rgf_cluster, dict) else {}
+        runtime_cert["omp_threads"] = int(omp_threads)
+        runtime_cert["parallel_policy"] = str(execution_plan.parallel_policy)
+        runtime_cert["blas_backend"] = str(
+            build_probe.get("blas_backend")
+            or build_probe.get("build_blas_backend")
+            or rgf_blas_backend
+        )
+        runtime_cert["workspace_bytes"] = int(rgf_summary.per_rank_bytes) * int(mpi_np)
+        runtime_cert["max_dense_dim"] = int(
+            runtime_cert.get("max_superslice_dim", rgf_summary.superslice_dim)
+        )
+        runtime_cert["task_shape"] = _jsonable(rgf_summary.task_shape)
+        runtime_cert["build_env"] = _jsonable(
+            build_probe.get("build_env", {}) if isinstance(build_probe, dict) else {}
+        )
+        runtime_cert["validate_against"] = str(rgf_validate_against)
+        runtime_cert["canonicalized_input"] = bool(canonical_input.was_canonicalized)
+        runtime_cert["axis_mapping"] = {
+            "lead_axis_requested": lead_axis,
+            "thickness_axis_requested": thickness_axis,
+            "periodic_axis_requested": rgf_periodic_axis,
+            "lead_axis_native": "x",
+            "thickness_axis_native": "z",
+            "periodic_axis_native": "y",
+            "permutation": list(canonical_input.permutation),
+        }
+        results = convert_rgf_raw_to_transport_results(
+            raw_payload,
+            win_path=canonical_win_path,
+            disorder_key=float(disorder_strengths[0] if disorder_strengths else 0.0),
+            carrier_density_m3=self.cfg.get("carrier_density_m3"),
+            fermi_velocity_m_per_s=self.cfg.get("fermi_velocity_m_per_s"),
+        )
+        meta_payload = results.setdefault("meta", {})
+        if isinstance(meta_payload, dict):
+            meta_payload["rgf_full_finite_sigma_backend"] = str(
+                self.cfg.get("transport_rgf_full_finite_sigma_backend", "native")
+            ).strip().lower() or "native"
+            kwant_script_cfg = str(
+                self.cfg.get("transport_rgf_full_finite_kwant_script", "")
+            ).strip()
+            if kwant_script_cfg:
+                meta_payload["rgf_full_finite_kwant_script"] = kwant_script_cfg
+            meta_payload["rgf_parallel_policy"] = str(execution_plan.parallel_policy)
+            meta_payload["rgf_blas_backend"] = str(runtime_cert.get("blas_backend", rgf_blas_backend))
+            meta_payload["rgf_validate_against"] = str(rgf_validate_against)
+            meta_payload["rgf_axis_mapping"] = _jsonable(runtime_cert.get("axis_mapping", {}))
+            meta_payload["rgf_runtime_cert"] = _jsonable(runtime_cert)
+            meta_payload["rgf_preflight"] = {
+                "n_orb": int(rgf_summary.n_orb),
+                "principal_layer_width": int(rgf_summary.principal_layer_width),
+                "superslice_dim": int(rgf_summary.superslice_dim),
+                "per_rank_bytes": int(rgf_summary.per_rank_bytes),
+                "transport_task_count": int(rgf_summary.transport_task_count),
+                "task_shape": _jsonable(rgf_summary.task_shape),
+                "queue_cores": int(rgf_summary.queue_cores),
+                "safe_rank_cap": int(rgf_summary.safe_rank_cap),
+                "mpi_np": int(mpi_np),
+                "omp_threads": int(omp_threads),
+                "mode": str(rgf_summary.mode),
+                "periodic_axis": rgf_summary.periodic_axis,
+            }
+
+        cert_path.write_text(json.dumps(_jsonable(runtime_cert), indent=2))
+        final_result_path.write_text(
+            json.dumps(
+                {
+                    "transport_results": _jsonable(results),
+                    "runtime_cert": _jsonable(runtime_cert),
+                    "transport_results_raw": _jsonable(raw_payload),
+                },
+                indent=2,
+            )
+        )
+        return self._normalize_transport_results(results), meta
+
     @staticmethod
-    def _thread_exports(command: str, *, threads: int) -> str:
+    def _thread_exports(
+        command: str,
+        *,
+        threads: int,
+        full_node_threading: bool = False,
+    ) -> str:
         t = max(1, int(threads))
         exports = (
             f"export OMP_NUM_THREADS={t}; "
             f"export MKL_NUM_THREADS={t}; "
             f"export OPENBLAS_NUM_THREADS={t}; "
             f"export NUMEXPR_NUM_THREADS={t}; "
+            f"export OMP_PROC_BIND=spread; "
+            f"export OMP_PLACES=cores; "
         )
+        if full_node_threading:
+            # Single-rank threaded jobs should see the full PBS cpuset instead of
+            # inheriting MPI rank pinning to a single socket/core subset.
+            exports += "export I_MPI_PIN=0; "
         return exports + command
 
     @staticmethod
@@ -1442,6 +1977,16 @@ class TopoSlabWorkflow:
         preset = get_material(material)
         lcao_engine = self._variant_dft_engine()
         cluster_cfg = ClusterConfig.from_env()
+        siesta_cfg = self._dft_siesta_cfg()
+        if lcao_engine == "siesta" and bool(siesta_cfg.get("spin_orbit", True)):
+            raise RuntimeError(
+                "dft.anchor_transfer with LCAO engine 'siesta' and spin_orbit=true is "
+                "unsupported by the current SIESTA↔Wannier bridge. "
+                "In this source tree, Src/siesta2wannier90.F90:getFileNameRoot dies for "
+                "non-collinear/SOC spin cases. Disable dft.anchor_transfer for this run, "
+                "or use an LCAO engine whose Wannier bridge supports SOC."
+            )
+        anchor_queue = cluster_cfg.pbs_queue
 
         anchor_dir = run_dir / "dft_anchor_lcao"
         anchor_dir.mkdir(parents=True, exist_ok=True)
@@ -1487,7 +2032,7 @@ class TopoSlabWorkflow:
                         "n_nodes": self.cfg.get("n_nodes", 1),
                         "n_cores_per_node": cluster_cfg.mpi_cores,
                         "n_cores_by_queue": cluster_cfg.mpi_cores_by_queue,
-                        "queue": cluster_cfg.pbs_queue,
+                        "queue": anchor_queue,
                         "queue_priority": cluster_cfg.pbs_queue_priority,
                         "kpoints_scf": k_scf,
                         "kpoints_nscf": k_nscf,
@@ -1501,19 +2046,20 @@ class TopoSlabWorkflow:
                     if lcao_engine == "siesta":
                         from wtec.siesta.parser import parse_fermi_energy
                         from wtec.siesta.runner import SiestaPipeline as PipelineClass
-
-                        siesta_cfg = self._dft_siesta_cfg()
                         pipeline = PipelineClass(
                             atoms_ref,
                             material,
                             jm,
-                            pseudo_dir=str(siesta_cfg.get("pseudo_dir") or cluster_cfg.siesta_pseudo_dir),
+                            pseudo_dir=cluster_cfg.resolved_siesta_pseudo_dir(
+                                spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
+                                explicit=str(siesta_cfg.get("pseudo_dir", "")).strip(),
+                            ),
                             basis_profile=str(siesta_cfg.get("basis_profile", "")).strip(),
                             wannier_interface=str(
                                 siesta_cfg.get("wannier_interface", "sisl")
                             ).strip().lower(),
                             spin_orbit=bool(siesta_cfg.get("spin_orbit", True)),
-                            include_pao_basis=bool(siesta_cfg.get("include_pao_basis", True)),
+                            include_pao_basis=bool(siesta_cfg.get("include_pao_basis", False)),
                             mpi_np_scf=int(siesta_cfg.get("mpi_np_scf", 0)),
                             mpi_np_nscf=int(siesta_cfg.get("mpi_np_nscf", 0)),
                             mpi_np_wannier=int(siesta_cfg.get("mpi_np_wannier", 0)),
@@ -1604,7 +2150,7 @@ class TopoSlabWorkflow:
 
         fermi_pes = self._state.get("outputs", {}).get("fermi_ev")
         if fermi_pes is None:
-            fermi_pes = 0.0
+            fermi_pes = self.cfg.get("fermi_shift_eV", 0.0)
         try:
             fermi_pes = float(fermi_pes)
         except Exception:
@@ -1630,6 +2176,7 @@ class TopoSlabWorkflow:
             fit_window_ev=float(cfg_anchor.get("fit_window_ev", 1.5)),
             fit_kmesh=tuple(int(v) for v in cfg_anchor.get("fit_kmesh", [8, 8, 8])),
             alpha_grid=alpha_grid,
+            anchor_species_counts=dict(Counter(atoms_ref.get_chemical_symbols())),
         )
         artifact["attempt_history"] = attempt_history
         artifact["anchor"]["lcao_engine"] = lcao_engine
@@ -1758,7 +2305,12 @@ class TopoSlabWorkflow:
                 )
                 topo_result = topo.run()
                 topo_summary = topo_result.get("summary", topo_result)
-                self._state["outputs"]["topology_results"] = "computed"
+                topo_status = "computed"
+                if isinstance(topo_summary, dict):
+                    summary_status = str(topo_summary.get("status", "")).strip().lower()
+                    if summary_status in {"failed", "skipped"}:
+                        topo_status = summary_status
+                self._state["outputs"]["topology_results"] = topo_status
                 self._state["outputs"]["topology_summary"] = topo_summary
                 if isinstance(topo_summary, dict):
                     if isinstance(topo_summary.get("variant_hr_map"), dict):
@@ -1830,7 +2382,7 @@ class TopoSlabWorkflow:
 
     def _save_checkpoint(self) -> None:
         self._checkpoint_file.parent.mkdir(parents=True, exist_ok=True)
-        self._checkpoint_file.write_text(json.dumps(self._state, indent=2))
+        self._checkpoint_file.write_text(json.dumps(_jsonable(self._state), indent=2))
 
     def _load_checkpoint(self) -> None:
         if self._checkpoint_file.exists():

@@ -9,12 +9,24 @@ import re
 import shlex
 import subprocess
 import sys
+import tarfile
 import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Optional
 
 import click
+
+from wtec.rgf import (
+    RGF_BINARY_ID,
+    normalize_axis,
+    normalize_rgf_blas_backend,
+    normalize_rgf_mode,
+    normalize_rgf_parallel_policy,
+    normalize_rgf_validate_against,
+    normalize_transport_engine,
+    resolve_transport_engine,
+)
 
 # ---------------------------------------------------------------------------
 # Dependency manifest
@@ -52,6 +64,18 @@ _DEFAULT_FORCE_STRESS_REFERENCE_OUTCAR = (
     "/home/msj/Desktop/playground/ni-si-dev/actual_potential_run/"
     "cpu_work/vasp_runs/iter_000/frame_002/OUTCAR"
 )
+_CRITICAL_RUNTIME_VERSION_BOUNDS = {
+    "numpy": {
+        "dist": "numpy",
+        "min_version": (1, 24, 0),
+        "max_exclusive": (2, 0, 0),
+    },
+    "scipy": {
+        "dist": "scipy",
+        "min_version": (1, 10, 0),
+        "max_exclusive": (1, 14, 0),
+    },
+}
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +95,7 @@ def main(ctx: click.Context) -> None:
     """
     if ctx.invoked_subcommand and ctx.invoked_subcommand != "init":
         _maybe_reexec_in_init_venv()
+        _apply_runtime_env_from_init_state()
 
 
 # ---------------------------------------------------------------------------
@@ -351,6 +376,11 @@ def init(
     # ── 2. Core dependencies ─────────────────────────────────────────────
     click.echo(click.style("\n[2/8] Core dependencies", bold=True))
     _pip_install(pip, CORE_DEPS, dry_run=dry_run)
+    _repair_local_runtime_stack(
+        pip_base=pip,
+        python_executable=str(venv_python),
+        dry_run=dry_run,
+    )
 
     # ── 3. Optional extras ───────────────────────────────────────────────
     berry_enabled = False
@@ -378,6 +408,7 @@ def init(
 
     # ── 5. Kwant installation ────────────────────────────────────────────
     click.echo(click.style("\n[5/8] kwant", bold=True))
+    local_kwant_solver: dict[str, Any] | None = None
     if dry_run:
         click.echo("  (dry-run) would verify/install kwant in venv")
         kwant_ready = True
@@ -512,6 +543,13 @@ def init(
             raise click.ClickException(
                 "Kwant is not importable in the configured venv after installation attempts."
             )
+    if not no_kwant:
+        local_kwant_solver = _prepare_local_kwant_mumps(
+            pip_base=pip,
+            python_executable=str(venv_python),
+            dry_run=dry_run,
+            strict=False,
+        )
 
     # ── 6. Workspace setup ───────────────────────────────────────────────
     click.echo(click.style("\n[6/8] Workspace + env setup", bold=True))
@@ -533,6 +571,16 @@ def init(
             fg="green",
         )
     )
+    if local_kwant_solver is not None and not dry_run:
+        _update_init_state(
+            {
+                "solver_capabilities": {
+                    "local": {
+                        "kwant": local_kwant_solver,
+                    }
+                }
+            }
+        )
 
     # ── 7. Verification ──────────────────────────────────────────────────
     click.echo(click.style("\n[7/8] Verification", bold=True))
@@ -540,6 +588,7 @@ def init(
         python_executable=str(venv_python),
         dry_run=dry_run,
         check_kwant=(not no_kwant),
+        check_kwant_mumps=False,
         check_berry=berry_enabled,
     )
 
@@ -578,8 +627,9 @@ def init(
 
     # Remote cluster Python prep (kwant / wannierberri)
     click.echo(click.style("\n[cluster] Remote Python feature prep", bold=True))
+    cluster_python_status: dict[str, Any] | None = None
     if prepare_cluster_python:
-        _prepare_cluster_python_setup(
+        cluster_python_status = _prepare_cluster_python_setup(
             dry_run=dry_run,
             remote_python_executable=cluster_python_exe,
             ensure_kwant=(not no_kwant),
@@ -587,8 +637,44 @@ def init(
             ensure_sisl=True,
             ensure_berry=cluster_python_berry,
         )
+        if cluster_python_status is not None and not dry_run:
+            _update_init_state(
+                {
+                    "solver_capabilities": {
+                        "cluster": {
+                            "kwant": cluster_python_status.get("kwant"),
+                            "python_executable": str(cluster_python_exe),
+                        }
+                    }
+                }
+        )
     else:
         click.echo("  skipped (--no-prepare-cluster-python)")
+
+    click.echo(click.style("\n[cluster] Native RGF router prep", bold=True))
+    rgf_router_status: dict[str, Any] | None = _prepare_cluster_rgf_router_setup(
+        dry_run=dry_run,
+    )
+    if rgf_router_status is not None and not dry_run:
+        _update_init_state(
+            {
+                "rgf": {
+                    "cluster": rgf_router_status,
+                },
+                "solver_capabilities": {
+                    "cluster": {
+                        "rgf": {
+                            "ready": bool(rgf_router_status.get("ready")),
+                            "binary_id": str(rgf_router_status.get("binary_id") or RGF_BINARY_ID),
+                            "binary_path": str(rgf_router_status.get("binary_path") or ""),
+                            "numerical_status": str(
+                                rgf_router_status.get("numerical_status") or "scaffold_only"
+                            ),
+                        }
+                    }
+                },
+            }
+        )
 
     click.echo(click.style("\n[cluster] Final backend verification", bold=True))
     if validate_cluster and prepare_cluster_tools:
@@ -642,24 +728,295 @@ def _ensure_venv(
     if dry_run:
         return venv_python
 
+    cache_env = _subprocess_env_with_writable_cache()
+    ensurepip_cmd = [str(venv_python), "-m", "ensurepip", "--upgrade"]
+    subprocess.run(ensurepip_cmd, capture_output=True, text=True, env=cache_env)
+
     # Keep packaging tools current in the venv.
     cmd = [str(venv_python), "-m", "pip", "install", "--upgrade", "pip", "setuptools", "wheel"]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, env=cache_env)
     if result.returncode != 0:
+        combined = "\n".join(part.strip() for part in [result.stdout, result.stderr] if part.strip())
+        if _is_pip_network_error(combined):
+            probe = subprocess.run(
+                [str(venv_python), "-c", "import pip, setuptools; print('ok')"],
+                capture_output=True,
+                text=True,
+                env=cache_env,
+            )
+            if probe.returncode == 0:
+                click.echo(
+                    click.style(
+                        "  WARNING: pip bootstrap upgrade skipped because network access is unavailable; "
+                        "continuing with the venv's bundled packaging tools.",
+                        fg="yellow",
+                    )
+                )
+                return venv_python
         raise click.ClickException(
             "Failed to bootstrap pip/setuptools/wheel in venv:\n"
-            f"{result.stderr.strip()}"
+            f"{combined or result.stderr.strip()}"
         )
     return venv_python
 
 
 def _module_importable(python_executable: str, module_name: str) -> bool:
+    result = _module_import_result(python_executable, module_name)
+    return result.returncode == 0
+
+
+def _module_import_result(python_executable: str, module_name: str) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         [python_executable, "-c", f"import {module_name}"],
         capture_output=True,
         text=True,
+        env=_subprocess_env_for_python(python_executable),
     )
-    return result.returncode == 0
+    return result
+
+
+def _kwant_solver_probe_code() -> str:
+    return (
+        "import importlib, json, sys, warnings\n"
+        "status = {\n"
+        "  'kwant_importable': False,\n"
+        "  'kwant_version': None,\n"
+        "  'solver': 'unknown',\n"
+        "  'mumps_available': False,\n"
+        "  'python_mumps_importable': False,\n"
+        "  'python_version': sys.version.split()[0],\n"
+        "  'reason': None,\n"
+        "}\n"
+        "try:\n"
+        "  with warnings.catch_warnings():\n"
+        "    warnings.simplefilter('ignore')\n"
+        "    kwant = importlib.import_module('kwant')\n"
+        "    importlib.import_module('kwant.solvers.default')\n"
+        "  status['kwant_importable'] = True\n"
+        "  status['kwant_version'] = getattr(kwant, '__version__', 'ok')\n"
+        "except Exception as exc:\n"
+        "  status['reason'] = f\"kwant_import_failed:{type(exc).__name__}:{exc}\"\n"
+        "  print(json.dumps(status))\n"
+        "  raise SystemExit(0)\n"
+        "try:\n"
+        "  with warnings.catch_warnings():\n"
+        "    warnings.simplefilter('ignore')\n"
+        "    importlib.import_module('mumps')\n"
+        "  status['python_mumps_importable'] = True\n"
+        "except Exception:\n"
+        "  pass\n"
+        "try:\n"
+        "  with warnings.catch_warnings():\n"
+        "    warnings.simplefilter('ignore')\n"
+        "    importlib.import_module('kwant.solvers.mumps')\n"
+        "  status['solver'] = 'mumps'\n"
+        "  status['mumps_available'] = True\n"
+        "except Exception as exc:\n"
+        "  status['solver'] = 'scipy_fallback'\n"
+        "  status['reason'] = f\"mumps_unavailable:{type(exc).__name__}:{exc}\"\n"
+        "print(json.dumps(status))\n"
+    )
+
+
+def _parse_json_line(stdout: str) -> dict[str, Any] | None:
+    for line in reversed((stdout or "").splitlines()):
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _probe_local_kwant_solver(python_executable: str) -> dict[str, Any]:
+    result = subprocess.run(
+        [python_executable, "-c", _kwant_solver_probe_code()],
+        capture_output=True,
+        text=True,
+        env=_subprocess_env_for_python(python_executable),
+    )
+    payload = _parse_json_line(result.stdout)
+    if payload is None:
+        reason = (result.stderr or result.stdout or "").strip() or "probe_failed"
+        payload = {
+            "kwant_importable": False,
+            "kwant_version": None,
+            "solver": "unknown",
+            "mumps_available": False,
+            "python_mumps_importable": False,
+            "reason": f"probe_failed:{reason.splitlines()[-1]}",
+        }
+    payload["probe_completed"] = True
+    payload["python_executable"] = str(python_executable)
+    return payload
+
+
+def _python_mumps_spec_for_version(version: tuple[int, int, int] | None) -> str:
+    if version is None:
+        return "python-mumps<0.0.4"
+    if version >= (3, 12, 0):
+        return "python-mumps<0.1"
+    return "python-mumps<0.0.4"
+
+
+def _probe_kwant_solver_note(status: dict[str, Any]) -> str:
+    solver = str(status.get("solver", "unknown")).strip() or "unknown"
+    reason = str(status.get("reason") or "").strip()
+    if solver == "mumps" and bool(status.get("mumps_available")):
+        return "mumps"
+    if reason:
+        return f"{solver} ({reason})"
+    return solver
+
+
+def _parse_version_tuple(raw: str) -> tuple[int, ...] | None:
+    if not raw:
+        return None
+    nums = [int(tok) for tok in re.findall(r"\d+", raw)]
+    if not nums:
+        return None
+    while len(nums) < 3:
+        nums.append(0)
+    return tuple(nums[:3])
+
+
+def _version_in_bounds(
+    version: tuple[int, ...],
+    *,
+    min_version: tuple[int, int, int] | None = None,
+    max_exclusive: tuple[int, int, int] | None = None,
+) -> bool:
+    if min_version is not None and version < min_version:
+        return False
+    if max_exclusive is not None and version >= max_exclusive:
+        return False
+    return True
+
+
+def _format_version_tuple(version: tuple[int, ...] | None) -> str:
+    if version is None:
+        return "unknown"
+    return ".".join(str(int(x)) for x in version)
+
+
+def _installed_distribution_version(python_executable: str, dist_name: str) -> str | None:
+    code = (
+        "import importlib.metadata as im; "
+        f"print(im.version({dist_name!r}))"
+    )
+    result = subprocess.run(
+        [python_executable, "-c", code],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    version = result.stdout.strip()
+    return version or None
+
+
+def _critical_runtime_version_issues(python_executable: str) -> list[str]:
+    issues: list[str] = []
+    for module_name, bounds in _CRITICAL_RUNTIME_VERSION_BOUNDS.items():
+        version_raw = _installed_distribution_version(
+            python_executable,
+            str(bounds["dist"]),
+        )
+        version = _parse_version_tuple(version_raw or "")
+        if version is None:
+            issues.append(f"{module_name} is missing from the venv")
+            continue
+        if not _version_in_bounds(
+            version,
+            min_version=bounds["min_version"],
+            max_exclusive=bounds["max_exclusive"],
+        ):
+            issues.append(
+                f"{module_name} {version_raw} is outside the supported range "
+                f"[{_format_version_tuple(bounds['min_version'])}, "
+                f"{_format_version_tuple(bounds['max_exclusive'])})"
+            )
+    return issues
+
+
+def _repair_local_runtime_stack(
+    *,
+    pip_base: list[str],
+    python_executable: str,
+    dry_run: bool,
+) -> None:
+    issues = _critical_runtime_version_issues(python_executable)
+    if not issues:
+        return
+
+    click.echo(
+        click.style(
+            "  Repairing local numeric stack for ABI-compatible runtime:",
+            fg="yellow",
+        )
+    )
+    for issue in issues:
+        click.echo(click.style(f"    - {issue}", fg="yellow"))
+
+    _pip_install(
+        pip_base,
+        ["numpy>=1.24,<2", "scipy>=1.10,<1.14"],
+        dry_run=dry_run,
+        editable=False,
+        raise_on_error=False,
+        extra_args=["--force-reinstall", "--no-cache-dir"],
+    )
+
+    if dry_run:
+        return
+
+    remaining = _critical_runtime_version_issues(python_executable)
+    if remaining:
+        details = "\n".join(f"  - {item}" for item in remaining)
+        raise click.ClickException(
+            "Critical local runtime packages remain incompatible after repair:\n"
+            f"{details}"
+        )
+
+
+def _subprocess_env_with_writable_cache() -> dict[str, str]:
+    env = dict(os.environ)
+    pip_cache = env.get("PIP_CACHE_DIR")
+    if not pip_cache or not os.access(pip_cache, os.W_OK):
+        default_cache = Path("/tmp/wtec-pip-cache")
+        default_cache.mkdir(parents=True, exist_ok=True)
+        env["PIP_CACHE_DIR"] = str(default_cache)
+    return env
+
+
+def _subprocess_env_for_python(python_executable: str | None = None) -> dict[str, str]:
+    env = _subprocess_env_with_writable_cache()
+    if python_executable:
+        try:
+            bindir = str(Path(python_executable).expanduser().resolve().parent)
+        except Exception:
+            bindir = str(Path(python_executable).expanduser().parent)
+        current_path = env.get("PATH", "")
+        if bindir and bindir not in current_path.split(os.pathsep):
+            env["PATH"] = bindir + (os.pathsep + current_path if current_path else "")
+    return env
+
+
+def _is_pip_network_error(message: str) -> bool:
+    text = (message or "").lower()
+    needles = (
+        "failed to establish a new connection",
+        "temporary failure in name resolution",
+        "name or service not known",
+        "connection error",
+        "connection broken",
+        "could not fetch url",
+    )
+    return any(needle in text for needle in needles)
 
 
 def _python_version_tuple(python_executable: str) -> Optional[tuple[int, int, int]]:
@@ -730,6 +1087,77 @@ def _local_source_python_compatible(package_dir: Path, python_executable: str) -
     return True, None
 
 
+def _prepare_local_kwant_mumps(
+    *,
+    pip_base: list[str],
+    python_executable: str,
+    dry_run: bool,
+    strict: bool,
+) -> dict[str, Any]:
+    if dry_run:
+        return {
+            "probe_completed": False,
+            "kwant_importable": True,
+            "solver": "unknown",
+            "mumps_available": False,
+            "reason": "dry_run",
+            "python_executable": str(python_executable),
+        }
+
+    status = _probe_local_kwant_solver(python_executable)
+    if not bool(status.get("kwant_importable")):
+        if strict:
+            raise click.ClickException(
+                f"Kwant is not importable in the configured venv: {status.get('reason')}"
+            )
+        return status
+    if bool(status.get("mumps_available")):
+        click.echo(click.style("  kwant solver backend: mumps", fg="green"))
+        return status
+
+    pyver = _python_version_tuple(python_executable)
+    python_mumps_spec = _python_mumps_spec_for_version(pyver)
+    click.echo(
+        click.style(
+            f"  Preparing kwant MUMPS support ({python_mumps_spec})",
+            fg="yellow",
+        )
+    )
+    _pip_install(
+        pip_base,
+        [
+            "numpy>=1.24,<2",
+            "scipy>=1.10,<1.14",
+            "meson>=1.1",
+            "meson-python>=0.15",
+            "ninja",
+            "cython>=3",
+            "setuptools-scm",
+        ],
+        dry_run=dry_run,
+        editable=False,
+        raise_on_error=False,
+    )
+    _pip_install(
+        pip_base,
+        [python_mumps_spec],
+        dry_run=dry_run,
+        editable=False,
+        raise_on_error=False,
+        extra_args=["--no-build-isolation", "--no-cache-dir", "--force-reinstall"],
+    )
+    status = _probe_local_kwant_solver(python_executable)
+    note = _probe_kwant_solver_note(status)
+    color = "green" if bool(status.get("mumps_available")) else "yellow"
+    click.echo(click.style(f"  kwant solver backend: {note}", fg=color))
+    if strict and not bool(status.get("mumps_available")):
+        raise click.ClickException(
+            "Kwant is importable but MUMPS support is unavailable in the configured venv.\n"
+            f"Current solver status: {note}"
+        )
+    return status
+
+
 def _pip_install(
     pip_base: list[str],
     packages: list[str],
@@ -742,6 +1170,7 @@ def _pip_install(
 ) -> bool:
     success = True
     pip_args = list(extra_args or [])
+    python_for_env = str(pip_base[0]) if pip_base else None
     for pkg in packages:
         cmd_prefix = pip_base + pip_args
         if editable:
@@ -755,7 +1184,12 @@ def _pip_install(
             shown = f"{shown} --no-deps".strip()
         click.echo(f"  pip install {shown}")
         if not dry_run:
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=_subprocess_env_for_python(python_for_env),
+            )
             if result.returncode != 0:
                 click.echo(click.style(f"  ERROR: {result.stderr.strip()}", fg="red"))
                 success = False
@@ -1097,12 +1531,25 @@ def _setup_workspace(
         env_file.write_text(rendered)
 
     # Create local workspace dir
-    workspace = Path.home() / ".wtec"
+    workspace = _local_wtec_state_dir()
     click.echo(f"  Creating workspace: {workspace}")
     if not dry_run:
         workspace.mkdir(exist_ok=True)
         (workspace / "runs").mkdir(exist_ok=True)
         (workspace / "checkpoints").mkdir(exist_ok=True)
+        runtime_cache = workspace / "runtime-cache"
+        runtime_cache.mkdir(exist_ok=True)
+        default_mplconfig = runtime_cache / "matplotlib"
+        default_xdg_cache = runtime_cache / "xdg-cache"
+        runtime_env = {
+            "WTEC_STATE_DIR": str(workspace),
+            "MPLCONFIGDIR": os.environ.get("MPLCONFIGDIR", str(default_mplconfig)),
+            "XDG_CACHE_HOME": os.environ.get("XDG_CACHE_HOME", str(default_xdg_cache)),
+        }
+        for value in runtime_env.values():
+            Path(value).expanduser().mkdir(parents=True, exist_ok=True)
+        for key, value in runtime_env.items():
+            os.environ.setdefault(key, value)
         venv_python_abs = (venv_path / "bin" / "python").expanduser().absolute()
         init_state = {
             "initialized_at_epoch": int(time.time()),
@@ -1113,6 +1560,7 @@ def _setup_workspace(
             "cwd": str(Path.cwd()),
             "env_file": str(env_file.resolve()),
             "env_updates_applied": sorted(env_updates.keys()),
+            "runtime_env": runtime_env,
         }
         (workspace / "init_state.json").write_text(json.dumps(init_state, indent=2))
 
@@ -1192,6 +1640,21 @@ def _migrate_project_template(path: Path) -> bool:
     updated = updated.replace("dm_mixing_weight = 0.10", "dm_mixing_weight = 0.18")
     updated = updated.replace("dm_number_pulay = 8", "dm_number_pulay = 6")
     updated = updated.replace("max_scf_iterations = 200", "max_scf_iterations = 120")
+
+    def _update_section(doc: str, header: str, transform) -> str:
+        marker = f"[{header}]\n"
+        sec_start = doc.find(marker)
+        if sec_start < 0:
+            return doc
+        block_start = sec_start + len(marker)
+        block_end = doc.find("\n\n", block_start)
+        if block_end < 0:
+            block_end = len(doc)
+        block = doc[block_start:block_end]
+        new_block = transform(block)
+        if new_block == block:
+            return doc
+        return doc[:block_start] + new_block + doc[block_end:]
     if "failure_policy =" not in updated:
         updated = updated.replace(
             "strict_qsub = true",
@@ -1209,15 +1672,11 @@ def _migrate_project_template(path: Path) -> bool:
         )
     updated = updated.replace('failure_policy = "soft_nan"', 'failure_policy = "strict"')
     updated = updated.replace('hr_scope = "shared"', 'hr_scope = "per_variant"')
-    updated = updated.replace('arc_engine = "wannierberri"', 'arc_engine = "siesta_slab_ldos"')
+    updated = updated.replace('arc_engine = "wannierberri"', 'arc_engine = "hybrid_adaptive"')
     updated = updated.replace('node_method = "proxy"', 'node_method = "wannierberri_flux"')
     updated = updated.replace('policy = "dual_track_compare"', 'policy = "single_track"')
-    if "[topology]\n" in updated and "arc_allow_proxy_fallback =" not in updated.split("[topology]\n", 1)[1].split("\n\n", 1)[0]:
-        updated = updated.replace(
-            'arc_engine = "siesta_slab_ldos"',
-            'arc_engine = "siesta_slab_ldos"\narc_allow_proxy_fallback = false',
-            1,
-        )
+    updated = _update_section(updated, "topology", _migrate_topology_section)
+    updated = _update_section(updated, "topology.tiering.screen", _migrate_topology_screen_section)
     updated = updated.replace("transport_n_layers_x = 1", "transport_n_layers_x = 4")
     updated = updated.replace("scf = [4, 4, 1]", "scf = [8, 8, 8]")
     updated = updated.replace("nscf = [8, 8, 1]", "nscf = [12, 12, 12]")
@@ -1363,7 +1822,7 @@ def _migrate_project_template(path: Path) -> bool:
             "always_include_pristine = true\n"
             "selection_metric = \"S_total\"\n\n"
             "[topology.tiering.screen]\n"
-            "arc_engine = \"siesta_slab_ldos\"\n"
+            "arc_engine = \"hybrid_adaptive\"\n"
             "node_method = \"wannierberri_flux\"\n"
             "coarse_kmesh = [10, 10, 10]\n"
             "refine_kmesh = [3, 3, 3]\n"
@@ -1372,6 +1831,35 @@ def _migrate_project_template(path: Path) -> bool:
             "[topology.score]",
             1,
         )
+    if "[topology.adaptive_k]" not in updated:
+        adaptive_block = (
+            "\n\n[topology.adaptive_k]\n"
+            "enabled = true\n"
+            "surface_axis = \"z\"\n"
+            "global_kmesh_xy = [16, 16]\n"
+            "local_kmesh_xy = [48, 48]\n"
+            "fallback_global_refine_kmesh_xy = [40, 40]\n"
+            "window_radius_frac_xy = [0.06, 0.06]\n"
+            "energy_window_ev = 0.12\n"
+            "hotspot_gap_max_ev = 0.03\n"
+            "max_hotspots = 8\n"
+            "min_hotspots = 4\n"
+            "dedup_radius_frac = 0.03\n"
+            "require_inplane_transport = true"
+        )
+        inserted = False
+        for anchor in (
+            "[topology.hr_grid]",
+            "[topology.tiering]",
+            "[topology.score]",
+            "[topology.transport_probe]",
+        ):
+            if anchor in updated:
+                updated = updated.replace(anchor, f"{adaptive_block}\n\n{anchor}", 1)
+                inserted = True
+                break
+        if not inserted and "dedup_tol = 0.04" in updated:
+            updated = updated.replace("dedup_tol = 0.04", f"dedup_tol = 0.04{adaptive_block}", 1)
     if "[run]\n" in updated and "profile =" not in updated.split("[run]\n", 1)[1].split("\n\n", 1)[0]:
         updated = updated.replace("n_nodes = 1", "n_nodes = 1\nprofile = \"strict\"", 1)
     if "[dft]\n" in updated and "reuse_mode =" not in updated.split("[dft]\n", 1)[1].split("\n\n", 1)[0]:
@@ -1385,7 +1873,7 @@ def _migrate_project_template(path: Path) -> bool:
     if "[topology.transport_probe]" not in updated:
         updated = updated.rstrip() + (
             "\n\n[topology.transport_probe]\n"
-            "enabled = true\n"
+            "enabled = false\n"
             "n_ensemble = 1\n"
             "disorder_strength = 0.0\n"
             "energy_shift_ev = 0.0\n"
@@ -1395,6 +1883,72 @@ def _migrate_project_template(path: Path) -> bool:
         return False
     path.write_text(updated)
     return True
+
+
+def _migrate_topology_section(block: str) -> str:
+    lines = block.splitlines()
+    has_arc_engine = any(line.strip().startswith("arc_engine =") for line in lines)
+    has_proxy_flag = any(line.strip().startswith("arc_allow_proxy_fallback =") for line in lines)
+    has_node_method = any(line.strip().startswith("node_method =") for line in lines)
+    has_variant_engine = any(line.strip().startswith("variant_dft_engine =") for line in lines)
+    has_nx = any(line.strip().startswith("n_layers_x =") for line in lines)
+    has_ny = any(line.strip().startswith("n_layers_y =") for line in lines)
+
+    if not has_arc_engine:
+        lines.append('arc_engine = "hybrid_adaptive"')
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("arc_engine =") and (
+            stripped.endswith('"wannierberri"') or stripped.endswith('"siesta_slab_ldos"')
+        ):
+            lines[idx] = 'arc_engine = "hybrid_adaptive"'
+            break
+
+    def _insert_after(anchor_key: str, new_line: str) -> None:
+        for idx, line in enumerate(lines):
+            if line.strip().startswith(f"{anchor_key} ="):
+                lines.insert(idx + 1, new_line)
+                return
+        lines.append(new_line)
+
+    if not has_proxy_flag:
+        _insert_after("arc_engine", "arc_allow_proxy_fallback = false")
+    if not has_node_method:
+        _insert_after("arc_allow_proxy_fallback", 'node_method = "wannierberri_flux"')
+    if not has_variant_engine:
+        _insert_after("hr_scope", 'variant_dft_engine = "siesta"')
+    if not has_nx:
+        _insert_after("variant_dft_engine", "n_layers_x = 4")
+    if not has_ny:
+        _insert_after("n_layers_x", "n_layers_y = 16")
+    return "\n".join(lines)
+
+
+def _migrate_topology_screen_section(block: str) -> str:
+    lines = block.splitlines()
+    has_arc_engine = any(line.strip().startswith("arc_engine =") for line in lines)
+    has_node_method = any(line.strip().startswith("node_method =") for line in lines)
+
+    if not has_arc_engine:
+        lines.append('arc_engine = "hybrid_adaptive"')
+
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("arc_engine =") and (
+            stripped.endswith('"wannierberri"') or stripped.endswith('"siesta_slab_ldos"')
+        ):
+            lines[idx] = 'arc_engine = "hybrid_adaptive"'
+            break
+
+    if not has_node_method:
+        for idx, line in enumerate(lines):
+            if line.strip().startswith("arc_engine ="):
+                lines.insert(idx + 1, 'node_method = "wannierberri_flux"')
+                break
+        else:
+            lines.append('node_method = "wannierberri_flux"')
+    return "\n".join(lines)
 
 
 def _default_slab_template_text() -> str:
@@ -1744,6 +2298,7 @@ nscf = [12, 12, 12]
 
 [transport]
 policy = "single_track" # single_track|dual_track_compare
+engine = "auto" # kwant|rgf|auto
 thicknesses = [2, 4, 6, 8, 10, 12, 16, 20, 25]
 disorder_strengths = [0.0, 0.2]
 n_ensemble = 30
@@ -1768,9 +2323,24 @@ threads = 0
 # Kwant execution policy (transport stage only).
 kwant_enforce_1x64 = true
 require_mumps = true
-kwant_mode = "auto" # auto|sequential|task_parallel
+kwant_mode = "auto" # auto|sequential|task_parallel|periodic_y
+# Native RGF execution policy (transport stage only).
+rgf_mode = "periodic_transverse" # periodic_transverse|full_finite
+rgf_periodic_axis = "y" # x|y|z when rgf_mode=periodic_transverse
+rgf_parallel_policy = "auto" # auto|single_point|throughput
+rgf_threads_per_rank = "auto" # auto|<int>
+rgf_blas_backend = "auto" # auto|mkl|openblas
+rgf_validate_against = "none" # internal-only native execution; keep at none
+# Deprecated compatibility knobs retained for one release.
+rgf_full_finite_sigma_backend = "native" # deprecated: native only
+rgf_full_finite_kwant_script = "" # deprecated and unsupported
 # 0 = auto (uses adaptive worker count in task_parallel mode).
 kwant_task_workers = 0
+# MUMPS tuning for kwant.smatrix. Keep ordering empty to let kwant/MUMPS decide.
+# nrhs defaults to an auto-tuned value when omitted in runtime JSON.
+# mumps_nrhs = 8
+# mumps_ordering = "metis"
+# mumps_sparse_rhs = false
 # Optional override for transport worker python on cluster/login node.
 # If empty, falls back to [cluster].cluster_python_exe.
 cluster_python_exe = ""
@@ -1791,11 +2361,11 @@ max_concurrent_point_jobs = 1
 max_concurrent_variant_dft_jobs = 1
 # No-fork policy: always qsub/mpirun.
 variant_discovery_glob = "slab_variants/*.generated.meta.json"
-arc_engine = "siesta_slab_ldos"
+arc_engine = "hybrid_adaptive" # hybrid_adaptive|siesta_slab_ldos|wannierberri_strict|kwant
 arc_allow_proxy_fallback = false
 arc_kmesh_xy = [8, 8]
 arc_broadening_ev = 0.06
-siesta_slab_ldos_autogen = "tb_kresolved" # tb_kresolved|kwant_proxy|disabled
+siesta_slab_ldos_autogen = "tb_kresolved" # used when explicit slab-LDOS JSON is unavailable
 node_method = "wannierberri_flux"
 hr_scope = "per_variant"
 variant_dft_engine = "siesta"
@@ -1811,6 +2381,20 @@ newton_max_iter = 50
 gap_threshold_ev = 0.05
 max_candidates = 64
 dedup_tol = 0.04
+
+[topology.adaptive_k]
+enabled = true
+surface_axis = "z"
+global_kmesh_xy = [16, 16]
+local_kmesh_xy = [48, 48]
+fallback_global_refine_kmesh_xy = [40, 40]
+window_radius_frac_xy = [0.06, 0.06]
+energy_window_ev = 0.12
+hotspot_gap_max_ev = 0.03
+max_hotspots = 8
+min_hotspots = 4
+dedup_radius_frac = 0.03
+require_inplane_transport = true
 
 [topology.resources]
 node_phase_mpi_np = 64
@@ -1832,7 +2416,7 @@ always_include_pristine = true
 selection_metric = "S_total"
 
 [topology.tiering.screen]
-arc_engine = "siesta_slab_ldos"
+arc_engine = "hybrid_adaptive"
 node_method = "wannierberri_flux"
 coarse_kmesh = [10, 10, 10]
 refine_kmesh = [3, 3, 3]
@@ -1844,7 +2428,7 @@ w_topo = 0.70
 w_transport = 0.30
 
 [topology.transport_probe]
-enabled = true
+enabled = false
 n_ensemble = 1
 disorder_strength = 0.0
 energy_shift_ev = 0.0
@@ -1926,47 +2510,93 @@ def _verify_install(
     python_executable: str,
     dry_run: bool,
     check_kwant: bool = True,
+    check_kwant_mumps: bool = False,
     check_berry: bool = False,
 ) -> None:
     if dry_run:
         click.echo("  (skipped in dry-run mode)")
         return
 
-    checks = [
-        ("wtec",       "import wtec; print(getattr(wtec, '__version__', 'ok'))"),
-        ("numpy",      "import numpy; print(numpy.__version__)"),
-        ("scipy",      "import scipy; print(scipy.__version__)"),
-        ("ase",        "import ase; print(ase.__version__)"),
-        ("pymatgen",   "import importlib.metadata as im; print(im.version('pymatgen'))"),
-        ("mp-api",     "import importlib.metadata as im; print(im.version('mp-api'))"),
-        ("tbmodels",   "import tbmodels; print(tbmodels.__version__)"),
-        ("paramiko",   "import paramiko; print(paramiko.__version__)"),
-        ("joblib",     "import joblib; print(joblib.__version__)"),
-        ("mpi4py",     "from mpi4py import __version__ as v; print(v)"),
-        ("matplotlib", "import matplotlib; print(matplotlib.__version__)"),
-        ("click",      "import click; print(click.__version__)"),
+    checks: list[tuple[str, str, tuple[int, int, int] | None, tuple[int, int, int] | None]] = [
+        ("wtec",       "import wtec; print(getattr(wtec, '__version__', 'ok'))", None, None),
+        ("numpy",      "import numpy; print(numpy.__version__)", (1, 24, 0), (2, 0, 0)),
+        ("scipy",      "import scipy; print(scipy.__version__)", (1, 10, 0), (1, 14, 0)),
+        ("ase",        "import ase; print(ase.__version__)", None, None),
+        ("pymatgen",   "import importlib.metadata as im; print(im.version('pymatgen'))", None, None),
+        ("mp-api",     "import importlib.metadata as im; print(im.version('mp-api'))", None, None),
+        ("tbmodels",   "import tbmodels; print(tbmodels.__version__)", None, None),
+        ("paramiko",   "import paramiko; print(paramiko.__version__)", None, None),
+        ("joblib",     "import joblib; print(joblib.__version__)", None, None),
+        ("mpi4py",     "from mpi4py import __version__ as v; print(v)", None, None),
+        ("matplotlib", "import matplotlib; print(matplotlib.__version__)", None, None),
+        ("click",      "import click; print(click.__version__)", None, None),
     ]
     if check_kwant:
-        checks.append(("kwant", "import kwant; print(kwant.__version__)"))
+        checks.append(("kwant", "import kwant; print(kwant.__version__)", None, None))
     if check_berry:
         checks.append(
             (
                 "wannierberri",
                 "import wannierberri as wb; print(getattr(wb, '__version__', 'ok'))",
+                None,
+                None,
             )
         )
 
-    for name, code in checks:
+    failures: list[str] = []
+    for name, code, min_version, max_exclusive in checks:
         result = subprocess.run(
             [python_executable, "-c", code],
             capture_output=True,
             text=True,
+            env=_subprocess_env_for_python(python_executable),
         )
         if result.returncode == 0:
             ver = result.stdout.strip()
-            click.echo(click.style(f"  ✓ {name:<12} {ver}", fg="green"))
+            version_tuple = _parse_version_tuple(ver)
+            if (
+                (min_version is not None or max_exclusive is not None)
+                and version_tuple is not None
+                and not _version_in_bounds(
+                    version_tuple,
+                    min_version=min_version,
+                    max_exclusive=max_exclusive,
+                )
+            ):
+                failure = (
+                    f"{name} {ver} is outside the supported range "
+                    f"[{_format_version_tuple(min_version)}, "
+                    f"{_format_version_tuple(max_exclusive)})"
+                )
+                failures.append(failure)
+                click.echo(click.style(f"  ✗ {name:<12} {failure}", fg="red"))
+            else:
+                click.echo(click.style(f"  ✓ {name:<12} {ver}", fg="green"))
         else:
-            click.echo(click.style(f"  ✗ {name:<12} NOT FOUND", fg="red"))
+            detail = (result.stderr or result.stdout or "").strip()
+            detail = detail.splitlines()[-1] if detail else "NOT FOUND"
+            if name == "kwant" and "numpy.dtype size changed" in detail:
+                detail = "NumPy ABI mismatch"
+            failures.append(f"{name}: {detail}")
+            click.echo(click.style(f"  ✗ {name:<12} {detail}", fg="red"))
+
+    if failures:
+        lines = "\n".join(f"  - {failure}" for failure in failures)
+        raise click.ClickException(
+            "Verification failed. Re-run `wtec init` after fixing the environment:\n"
+            f"{lines}"
+        )
+
+    if check_kwant and check_kwant_mumps:
+        solver_status = _probe_local_kwant_solver(python_executable)
+        if bool(solver_status.get("mumps_available")):
+            click.echo(click.style("  ✓ kwant-mumps  mumps", fg="green"))
+        else:
+            note = _probe_kwant_solver_note(solver_status)
+            raise click.ClickException(
+                "Verification failed. Re-run `wtec init` after fixing the environment:\n"
+                f"  - kwant-mumps: {note}"
+            )
 
 
 def _validate_cluster_setup(
@@ -2097,10 +2727,24 @@ def _validate_cluster_setup_local() -> None:
             raise
         try:
             if preset is not None:
+                siesta_pseudo_dir = cfg.resolved_siesta_pseudo_dir(
+                    spin_orbit=True,
+                )
                 jm.ensure_remote_files(
-                    cfg.siesta_pseudo_dir,
+                    siesta_pseudo_dir,
                     sorted(set(preset.siesta_pseudopots.values())),
                 )
+                if not _remote_siesta_psml_supports_soc(
+                    ssh,
+                    pseudo_dir=siesta_pseudo_dir,
+                    filenames=sorted(set(preset.siesta_pseudopots.values())),
+                    modules=cfg.modules,
+                    bin_dirs=cfg.bin_dirs,
+                ):
+                    raise click.ClickException(
+                        "Configured SIESTA pseudo directory is not SOC-capable for PSML inputs. "
+                        "Set TOPOSLAB_SIESTA_SOC_PSEUDO_DIR to a fully-relativistic PSML cache."
+                    )
                 siesta_pseudo_check = f"required {default_material} SIESTA pseudos present"
             else:
                 siesta_pseudo_check = "required SIESTA pseudo check skipped (no preset)"
@@ -2192,6 +2836,32 @@ def _remote_python_mm(
         return int(a), int(b)
     except Exception:
         return (3, 10)
+
+
+def _probe_remote_kwant_solver(
+    ssh,
+    *,
+    python_executable: str,
+    modules: list[str],
+    bin_dirs: list[str] | None = None,
+) -> dict[str, Any]:
+    cmd = f"{shlex.quote(python_executable)} -c {shlex.quote(_kwant_solver_probe_code())}"
+    rc, out, err = ssh.run(_wrap_with_modules(cmd, modules, bin_dirs=bin_dirs), check=False)
+    payload = _parse_json_line(out)
+    if payload is None:
+        reason = (err or out or "").strip() or "probe_failed"
+        payload = {
+            "kwant_importable": False,
+            "kwant_version": None,
+            "solver": "unknown",
+            "mumps_available": False,
+            "python_mumps_importable": False,
+            "reason": f"probe_failed:{reason.splitlines()[-1]}",
+        }
+    payload["probe_completed"] = True
+    payload["python_executable"] = str(python_executable)
+    payload["returncode"] = int(rc)
+    return payload
 
 
 def _remote_install_or_raise(
@@ -2335,41 +3005,8 @@ def _prepare_remote_kwant(
     python_executable: str,
     modules: list[str],
     bin_dirs: list[str] | None = None,
-) -> None:
-    if _remote_importable(
-        ssh,
-        python_executable=python_executable,
-        module_name="kwant",
-        modules=modules,
-        bin_dirs=bin_dirs,
-    ):
-        return
-    pyq = shlex.quote(python_executable)
-    click.echo("  Preparing remote kwant (source build with numpy<2)")
-    _remote_install_or_raise(
-        ssh,
-        command=(
-            f"{pyq} -m pip install --user --upgrade --force-reinstall "
-            "'numpy<2' 'scipy<1.14'"
-        ),
-        modules=modules,
-        bin_dirs=bin_dirs,
-    )
-    _remote_install_or_raise(
-        ssh,
-        command=f"{pyq} -m pip install --user --upgrade meson-python ninja cython setuptools-scm",
-        modules=modules,
-        bin_dirs=bin_dirs,
-    )
-    _remote_install_or_raise(
-        ssh,
-        command=(
-            f"{pyq} -m pip install --user --force-reinstall --no-deps "
-            "--no-build-isolation --no-binary=:all: --no-cache-dir kwant"
-        ),
-        modules=modules,
-        bin_dirs=bin_dirs,
-    )
+    bootstrap_root: str | None = None,
+) -> dict[str, Any]:
     if not _remote_importable(
         ssh,
         python_executable=python_executable,
@@ -2377,7 +3014,183 @@ def _prepare_remote_kwant(
         modules=modules,
         bin_dirs=bin_dirs,
     ):
-        raise click.ClickException("Remote kwant remains unavailable after installation.")
+        pyq = shlex.quote(python_executable)
+        click.echo("  Preparing remote kwant (source build with numpy<2)")
+        _remote_install_or_raise(
+            ssh,
+            command=(
+                f"{pyq} -m pip install --user --upgrade --force-reinstall "
+                "'numpy<2' 'scipy<1.14'"
+            ),
+            modules=modules,
+            bin_dirs=bin_dirs,
+        )
+        _remote_install_or_raise(
+            ssh,
+            command=f"{pyq} -m pip install --user --upgrade meson-python ninja cython setuptools-scm",
+            modules=modules,
+            bin_dirs=bin_dirs,
+        )
+        _remote_install_or_raise(
+            ssh,
+            command=(
+                f"{pyq} -m pip install --user --force-reinstall --no-deps "
+                "--no-build-isolation --no-binary=:all: --no-cache-dir kwant"
+            ),
+            modules=modules,
+            bin_dirs=bin_dirs,
+        )
+        if not _remote_importable(
+            ssh,
+            python_executable=python_executable,
+            module_name="kwant",
+            modules=modules,
+            bin_dirs=bin_dirs,
+        ):
+            raise click.ClickException("Remote kwant remains unavailable after installation.")
+
+    status = _probe_remote_kwant_solver(
+        ssh,
+        python_executable=python_executable,
+        modules=modules,
+        bin_dirs=bin_dirs,
+    )
+    if bool(status.get("mumps_available")):
+        click.echo(click.style("  remote kwant solver backend: mumps", fg="green"))
+        return status
+
+    py_mm = _remote_python_mm(
+        ssh,
+        python_executable=python_executable,
+        modules=modules,
+        bin_dirs=bin_dirs,
+    )
+    python_mumps_spec = _python_mumps_spec_for_version((py_mm[0], py_mm[1], 0))
+    pyq = shlex.quote(python_executable)
+    click.echo(
+        click.style(
+            f"  Preparing remote kwant MUMPS support ({python_mumps_spec})",
+            fg="yellow",
+        )
+    )
+    install_error = None
+    try:
+        _remote_install_or_raise(
+            ssh,
+            command=(
+                f"{pyq} -m pip install --user --upgrade --force-reinstall "
+                "'numpy<2' 'scipy<1.14'"
+            ),
+            modules=modules,
+            bin_dirs=bin_dirs,
+        )
+        _remote_install_or_raise(
+            ssh,
+            command=(
+                f"{pyq} -m pip install --user --upgrade "
+                "'meson>=1.1' 'meson-python>=0.15' ninja 'cython>=3' setuptools-scm"
+            ),
+            modules=modules,
+            bin_dirs=bin_dirs,
+        )
+        _remote_install_or_raise(
+            ssh,
+            command=(
+                f"{pyq} -m pip install --user --force-reinstall "
+                "--no-build-isolation --no-cache-dir "
+                f"{shlex.quote(python_mumps_spec)}"
+            ),
+            modules=modules,
+            bin_dirs=bin_dirs,
+        )
+    except click.ClickException as exc:
+        install_error = str(exc)
+    status = _probe_remote_kwant_solver(
+        ssh,
+        python_executable=python_executable,
+        modules=modules,
+        bin_dirs=bin_dirs,
+    )
+    if install_error:
+        status["install_error"] = install_error
+    note = _probe_kwant_solver_note(status)
+    color = "green" if bool(status.get("mumps_available")) else "yellow"
+    click.echo(click.style(f"  remote kwant solver backend: {note}", fg=color))
+    if bool(status.get("mumps_available")):
+        status["solver_provider"] = "python_mumps"
+        return status
+
+    root = str(bootstrap_root or "~/wtec_bootstrap").strip() or "~/wtec_bootstrap"
+    root_q = shlex.quote(root)
+    pyq = shlex.quote(python_executable)
+    click.echo(click.style("  Falling back to built-in kwant MUMPS wrapper rebuild", fg="yellow"))
+    builtin_script = "\n".join(
+        [
+            "set -euo pipefail",
+            f"ROOT={root_q}",
+            'PREFIX="$ROOT/prefix"',
+            'BUILD="$ROOT/build"',
+            'rm -rf "$ROOT"',
+            'mkdir -p "$PREFIX/include" "$PREFIX/lib" "$BUILD"',
+            'cd "$ROOT"',
+            'curl -L -sS https://mumps-solver.org/MUMPS_5.4.1.tar.gz -o mumps.tar.gz',
+            'tar -xzf mumps.tar.gz',
+            'cp MUMPS_5.4.1/include/*.h "$PREFIX/include/"',
+            'cp MUMPS_5.4.1/libseq/mpi.h "$PREFIX/include/" || true',
+            'cp MUMPS_5.4.1/libseq/mpif.h "$PREFIX/include/" || true',
+            'cat > "$PREFIX/include/mumps_int_def.h" <<EOF',
+            '#ifndef MUMPS_INT_DEF_H',
+            '#define MUMPS_INT_DEF_H',
+            '#define MUMPS_INTSIZE32 1',
+            '#endif',
+            'EOF',
+            'for spec in \\',
+            '  /lib64/libzmumps-5.4.so:libzmumps.so \\',
+            '  /lib64/libmumps_common-5.4.so:libmumps_common.so \\',
+            '  /lib64/libpord-5.4.so:libpord.so \\',
+            '  /lib64/libesmumps.so.1:libesmumps.so \\',
+            '  /lib64/libscotch.so.1:libscotch.so \\',
+            '  /lib64/libscotcherr.so.1:libscotcherr.so \\',
+            '  /lib64/libscotchmetis.so.1:libscotchmetis.so \\',
+            '  /lib64/libmetis.so.0:libmetis.so \\',
+            '  /lib64/libmpiseq-5.4.so:libmpiseq.so \\',
+            '  /lib64/libgfortran.so.5:libgfortran.so',
+            'do',
+            '  src=${spec%%:*}; dst=${spec##*:}; ln -sf "$src" "$PREFIX/lib/$dst"',
+            'done',
+            f'{pyq} -m pip download --no-deps -d "$BUILD" kwant==1.5.0 >/dev/null',
+            'tar -xzf "$BUILD/kwant-1.5.0.tar.gz" -C "$BUILD"',
+            'cat > "$BUILD/kwant-1.5.0/build.conf" <<EOF',
+            '[mumps]',
+            'include_dirs = $PREFIX/include',
+            'library_dirs = $PREFIX/lib',
+            'libraries = zmumps mumps_common pord esmumps scotch scotcherr scotchmetis metis mpiseq gfortran',
+            'extra_link_args = -Wl,-rpath,$PREFIX/lib',
+            'optional = 0',
+            'EOF',
+            'cd "$BUILD/kwant-1.5.0"',
+            f'{pyq} -m pip install --user --force-reinstall --no-deps --no-build-isolation .',
+        ]
+    )
+    _remote_install_or_raise(
+        ssh,
+        command=builtin_script,
+        modules=modules,
+        bin_dirs=bin_dirs,
+    )
+    status = _probe_remote_kwant_solver(
+        ssh,
+        python_executable=python_executable,
+        modules=modules,
+        bin_dirs=bin_dirs,
+    )
+    note = _probe_kwant_solver_note(status)
+    color = "green" if bool(status.get("mumps_available")) else "yellow"
+    click.echo(click.style(f"  remote kwant solver backend: {note}", fg=color))
+    if bool(status.get("mumps_available")):
+        status["solver_provider"] = "kwant_builtin"
+        status["bootstrap_root"] = root
+    return status
 
 
 def _remote_module_version(
@@ -2541,6 +3354,35 @@ def _validate_remote_siesta_capability(
     }
 
 
+def _remote_siesta_psml_supports_soc(
+    ssh,
+    *,
+    pseudo_dir: str,
+    filenames: list[str],
+    modules: list[str],
+    bin_dirs: list[str] | None = None,
+) -> bool:
+    psml_files = [str(name).strip() for name in filenames if str(name).strip().lower().endswith(".psml")]
+    if not psml_files:
+        return True
+    listed = " ".join(shlex.quote(name) for name in psml_files)
+    pseudo_q = shlex.quote(str(pseudo_dir).strip())
+    cmd = (
+        "ok=1; "
+        f"for f in {listed}; do "
+        f"p={pseudo_q}/$f; "
+        "[ -f \"$p\" ] || { ok=0; break; }; "
+        "grep -Eiq 'relativity=\"dirac\"' \"$p\" || { ok=0; break; }; "
+        "grep -Eiq 'set=\"(lj|spin_orbit)\"' \"$p\" || { ok=0; break; }; "
+        "done; "
+        "printf 'ok=%s\\n' \"$ok\""
+    )
+    rc, out, _ = ssh.run(_wrap_with_modules(cmd, modules, bin_dirs=bin_dirs), check=False)
+    if rc != 0:
+        return False
+    return "ok=1" in out
+
+
 def _remote_find_first_existing_dir(
     ssh,
     *,
@@ -2667,6 +3509,7 @@ def _prepare_cluster_toolchain_setup(
             f"/home/{cluster_user}/src/siesta" if cluster_user else "",
             f"/home/{cluster_user}/src/siesta-trunk" if cluster_user else "",
             f"/home/{cluster_user}/src/Siesta" if cluster_user else "",
+            f"/home/{cluster_user}/Desktop/code/MeMaD/test/.build/siesta-src" if cluster_user else "",
         ]
     )
 
@@ -2718,6 +3561,7 @@ def _prepare_cluster_toolchain_setup(
         needed = ["pw.x", "pw2wannier90.x", "wannier90.x"]
         qe_source_used: str | None = None
         w90_source_used: str | None = None
+        siesta_source_used: str | None = None
         resolved_bin_dirs = list(bin_dirs)
         missing = [
             exe
@@ -2963,6 +3807,7 @@ def _prepare_cluster_toolchain_setup(
                 )
                 raise click.ClickException(msg)
             else:
+                siesta_source_used = siesta_src
                 click.echo(f"  Building siesta from {siesta_src}")
                 src_q = shlex.quote(siesta_src)
                 build_dir = f"{siesta_src.rstrip('/')}/build_wtec"
@@ -3278,10 +4123,10 @@ def _prepare_cluster_python_setup(
     ensure_tbmodels: bool = True,
     ensure_sisl: bool = True,
     ensure_berry: bool = True,
-) -> None:
+) -> dict[str, Any] | None:
     if dry_run:
         click.echo("  (skipped in dry-run mode)")
-        return
+        return None
 
     from wtec.config.cluster import ClusterConfig
     from wtec.cluster.ssh import open_ssh
@@ -3291,13 +4136,17 @@ def _prepare_cluster_python_setup(
         cfg = ClusterConfig.from_env()
     except Exception as exc:
         click.echo(click.style(f"  WARNING: cluster config incomplete; skip remote python prep: {exc}", fg="yellow"))
-        return
+        return None
 
     click.echo(
         f"  Preparing cluster python via {remote_python_executable} "
         f"on {cfg.host}:{cfg.port}"
     )
     bin_dirs = _cluster_bin_dirs_from_env() or list(cfg.bin_dirs)
+    result: dict[str, Any] = {
+        "python_executable": str(remote_python_executable),
+        "kwant": None,
+    }
     with open_ssh(cfg) as ssh:
         jm = JobManager(ssh)
         jm.ensure_remote_commands(
@@ -3329,11 +4178,12 @@ def _prepare_cluster_python_setup(
                 bin_dirs=bin_dirs,
             )
         if ensure_kwant:
-            _prepare_remote_kwant(
+            result["kwant"] = _prepare_remote_kwant(
                 ssh,
                 python_executable=remote_python_executable,
                 modules=cfg.modules,
                 bin_dirs=bin_dirs,
+                bootstrap_root=f"{cfg.remote_workdir.rstrip('/')}/.wtec_bootstrap/kwant_mumps",
             )
 
         checks = [
@@ -3359,6 +4209,146 @@ def _prepare_cluster_python_setup(
                     f"Remote module import check failed after setup: {module_name}"
                 )
             click.echo(click.style(f"  ✓ remote {module_name:<12} {ver}", fg="green"))
+    return result
+
+
+def _rgf_scaffold_source_dir() -> Path:
+    return (Path(__file__).resolve().parent / "ext" / "rgf").resolve()
+
+
+def _rgf_scaffold_archive() -> Path:
+    src_dir = _rgf_scaffold_source_dir()
+    if not src_dir.exists():
+        raise click.ClickException(
+            f"RGF scaffold source directory not found: {src_dir}"
+        )
+    archive_dir = _wtec_state_dir() / "artifacts"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = archive_dir / f"{RGF_BINARY_ID}.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as tf:
+        for path in sorted(src_dir.rglob("*")):
+            rel = path.relative_to(src_dir)
+            tf.add(path, arcname=Path("rgf_scaffold") / rel)
+    return archive_path
+
+
+def _probe_remote_rgf_router(
+    ssh,
+    *,
+    binary_path: str,
+    modules: list[str],
+    bin_dirs: list[str] | None = None,
+) -> dict[str, Any]:
+    cmd = f"{shlex.quote(binary_path)} --probe"
+    rc, out, err = ssh.run(_wrap_with_modules(cmd, modules, bin_dirs=bin_dirs), check=False)
+    payload = _parse_json_line(out)
+    if payload is None:
+        reason = (err or out or "").strip() or "probe_failed"
+        payload = {
+            "probe_completed": False,
+            "ready": False,
+            "reason": f"probe_failed:{reason.splitlines()[-1]}",
+        }
+    payload["returncode"] = int(rc)
+    payload["binary_path"] = str(binary_path)
+    payload["binary_id"] = str(payload.get("binary_id") or RGF_BINARY_ID)
+    payload["probe_completed"] = bool(payload.get("probe_completed", rc == 0))
+    return payload
+
+
+def _prepare_cluster_rgf_router_setup(
+    *,
+    dry_run: bool,
+) -> dict[str, Any] | None:
+    if dry_run:
+        click.echo("  (skipped in dry-run mode)")
+        return None
+
+    from wtec.config.cluster import ClusterConfig
+    from wtec.cluster.ssh import open_ssh
+    from wtec.cluster.submit import JobManager
+
+    try:
+        cfg = ClusterConfig.from_env()
+    except Exception as exc:
+        click.echo(
+            click.style(
+                f"  WARNING: cluster config incomplete; skip RGF router prep: {exc}",
+                fg="yellow",
+            )
+        )
+        return None
+
+    archive_path = _rgf_scaffold_archive()
+    bin_dirs = _cluster_bin_dirs_from_env() or list(cfg.bin_dirs)
+    remote_root = f"{cfg.remote_workdir.rstrip('/')}/.wtec_bootstrap/rgf"
+    remote_archive = f"{remote_root.rstrip('/')}/{archive_path.name}"
+    remote_src = f"{remote_root.rstrip('/')}/rgf_scaffold"
+    remote_binary = f"{remote_src.rstrip('/')}/build/wtec_rgf_runner"
+
+    click.echo(f"  Preparing native RGF scaffold on {cfg.host}:{cfg.port}")
+    with open_ssh(cfg) as ssh:
+        jm = JobManager(ssh)
+        jm.ensure_remote_commands(
+            ["bash", "tar", "make", "mpirun"],
+            modules=cfg.modules,
+            bin_dirs=bin_dirs,
+        )
+        rc, _, _ = ssh.run(
+            _wrap_with_modules("command -v mpicc >/dev/null 2>&1", cfg.modules, bin_dirs=bin_dirs),
+            check=False,
+        )
+        if rc != 0:
+            raise click.ClickException(
+                "Remote RGF scaffold build requires `mpicc` on the cluster PATH/modules. "
+                "Load the MPI compiler module and re-run `wtec init`."
+            )
+        jm.stage_files([archive_path], remote_root)
+        unpack_cmd = (
+            f"rm -rf {shlex.quote(remote_src)} && "
+            f"mkdir -p {shlex.quote(remote_root)} && "
+            f"tar -xzf {shlex.quote(remote_archive)} -C {shlex.quote(remote_root)}"
+        )
+        ssh.run(_wrap_with_modules(unpack_cmd, cfg.modules, bin_dirs=bin_dirs))
+        build_cmd = f"cd {shlex.quote(remote_src)} && bash ./build_on_cluster.sh"
+        ssh.run(_wrap_with_modules(build_cmd, cfg.modules, bin_dirs=bin_dirs))
+        probe = _probe_remote_rgf_router(
+            ssh,
+            binary_path=remote_binary,
+            modules=cfg.modules,
+            bin_dirs=bin_dirs,
+        )
+
+    ready = bool(probe.get("probe_completed")) and int(probe.get("returncode", 1)) == 0
+    numerical_status = str(probe.get("numerical_status") or "scaffold_only").strip().lower()
+    status = {
+        "ready": ready,
+        "binary_id": str(probe.get("binary_id") or RGF_BINARY_ID),
+        "binary_path": str(remote_binary),
+        "build_root": str(remote_root),
+        "build_env": probe.get("build_env", {}),
+        "probe": probe,
+        "note": (
+            "native RGF phase-2 full-finite solver is present but still experimental"
+            if ready and numerical_status == "phase2_experimental"
+            else "native RGF phase-2 solver ready"
+            if ready and numerical_status == "phase2_ready"
+            else "native RGF phase-1 periodic-transverse solver ready"
+            if ready and numerical_status == "phase1_ready"
+            else "native scaffold prepared; numerical core pending"
+        ),
+        "numerical_status": numerical_status,
+    }
+    if ready:
+        click.echo(click.style(f"  ✓ native RGF scaffold ready: {remote_binary}", fg="green"))
+    else:
+        click.echo(
+            click.style(
+                "  WARNING: native RGF scaffold probe did not complete cleanly.",
+                fg="yellow",
+            )
+        )
+    return status
 
 
 # ---------------------------------------------------------------------------
@@ -3399,13 +4389,47 @@ def _maybe_reexec_in_init_venv() -> None:
 
     click.echo(click.style(f"[runtime] Auto-activating venv: {resolved_target}", fg="cyan"))
     env = dict(os.environ)
+    runtime_env = state.get("runtime_env")
+    if isinstance(runtime_env, dict):
+        for key, value in runtime_env.items():
+            if isinstance(key, str) and isinstance(value, str) and key.strip() and value.strip():
+                env.setdefault(key, value)
     env["WTEC_AUTO_VENV_REEXEC"] = "1"
     argv = [str(resolved_target), "-m", "wtec.cli", *sys.argv[1:]]
     os.execve(str(resolved_target), argv, env)
 
 
+def _apply_runtime_env_from_init_state() -> None:
+    state = _load_init_state()
+    if not state:
+        return
+    runtime_env = state.get("runtime_env")
+    if not isinstance(runtime_env, dict):
+        return
+    for key, value in runtime_env.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        if not key.strip() or not value.strip():
+            continue
+        os.environ.setdefault(key, value)
+
+
+def _local_wtec_state_dir() -> Path:
+    return (Path.cwd() / ".wtec").expanduser().resolve()
+
+
+def _wtec_state_dir() -> Path:
+    env_dir = os.environ.get("WTEC_STATE_DIR")
+    if isinstance(env_dir, str) and env_dir.strip():
+        return Path(env_dir).expanduser().resolve()
+    local_dir = _local_wtec_state_dir()
+    if local_dir.exists():
+        return local_dir
+    return (Path.home() / ".wtec").expanduser().resolve()
+
+
 def _load_init_state() -> dict[str, Any] | None:
-    state_path = Path.home() / ".wtec" / "init_state.json"
+    state_path = _wtec_state_dir() / "init_state.json"
     if not state_path.exists():
         return None
     try:
@@ -3413,6 +4437,25 @@ def _load_init_state() -> dict[str, Any] | None:
     except Exception:
         return None
     return data if isinstance(data, dict) else None
+
+
+def _deep_merge_dict(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _update_init_state(patch: dict[str, Any]) -> None:
+    state_dir = _wtec_state_dir()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_path = state_dir / "init_state.json"
+    current = _load_init_state() or {}
+    merged = _deep_merge_dict(current, patch)
+    state_path.write_text(json.dumps(merged, indent=2))
 
 
 def _default_run_dir_from_init_state() -> str | None:
@@ -3425,6 +4468,193 @@ def _default_run_dir_from_init_state() -> str | None:
     return cwd.strip()
 
 
+def _enforce_transport_mumps_from_init_state(
+    cfg: dict[str, Any],
+    *,
+    backend: str,
+) -> None:
+    if not bool(cfg.get("transport_require_mumps", True)):
+        return
+    state = _load_init_state() or {}
+    solver_caps = state.get("solver_capabilities")
+    if not isinstance(solver_caps, dict):
+        return
+    scope = "cluster" if backend == "qsub" else "local"
+    scope_caps = solver_caps.get(scope)
+    if not isinstance(scope_caps, dict):
+        return
+    kwant_caps = scope_caps.get("kwant")
+    if not isinstance(kwant_caps, dict) or not bool(kwant_caps.get("probe_completed")):
+        return
+    if bool(kwant_caps.get("mumps_available")):
+        return
+
+    expected_python = None
+    if scope == "cluster":
+        expected_python = str(
+            cfg.get(
+                "transport_cluster_python_exe",
+                cfg.get("topology", {}).get("cluster_python_exe", "python3"),
+            )
+        ).strip() or "python3"
+    else:
+        expected_python = str(state.get("venv_python") or state.get("python_executable") or "").strip()
+    recorded_python = str(kwant_caps.get("python_executable") or "").strip()
+    if expected_python and recorded_python and expected_python != recorded_python:
+        return
+
+    note = _probe_kwant_solver_note(kwant_caps)
+    hint = (
+        "Re-run `wtec init` so it can provision a MUMPS-capable Kwant backend "
+        f"for {scope} transport."
+    )
+    install_error = str(kwant_caps.get("install_error") or "").strip()
+    if install_error:
+        hint += f"\nRecorded init-time install failure:\n{install_error}"
+    raise click.UsageError(
+        f"transport_require_mumps=true but init recorded {scope} kwant solver={note}.\n{hint}"
+    )
+
+
+def _enforce_transport_rgf_from_init_state(
+    cfg: dict[str, Any],
+    *,
+    backend: str,
+    mode: str,
+    periodic_axis: str,
+) -> None:
+    if backend != "qsub":
+        raise click.UsageError(
+            "transport_engine='rgf' currently requires transport.backend='qsub'."
+        )
+    state = _load_init_state() or {}
+    rgf_root = state.get("rgf")
+    rgf_cluster = rgf_root.get("cluster") if isinstance(rgf_root, dict) else None
+    if not isinstance(rgf_cluster, dict):
+        raise click.UsageError(
+            "transport_engine='rgf' requires a cluster router prepared by `wtec init`."
+        )
+    if not bool(rgf_cluster.get("ready")):
+        note = str(rgf_cluster.get("note") or "router_not_ready").strip()
+        raise click.UsageError(
+            "transport_engine='rgf' requires a ready cluster router from `wtec init`.\n"
+            f"Recorded state: {note}"
+        )
+    binary_id = str(rgf_cluster.get("binary_id") or "").strip()
+    if binary_id and binary_id != RGF_BINARY_ID:
+        raise click.UsageError(
+            "RGF router build is stale relative to the current package. "
+            "Re-run `wtec init` to rebuild the native transport scaffold."
+        )
+    numerical_status = str(rgf_cluster.get("numerical_status") or "scaffold_only").strip().lower()
+    if numerical_status not in {"phase1_ready", "phase2_experimental", "phase2_ready"}:
+        raise click.UsageError(
+            "transport_engine='rgf' is wired only as a native scaffold right now; "
+            "the numerical transport core is not implemented yet. "
+            "Use transport.engine='auto' or 'kwant' for production runs."
+        )
+    try:
+        parallel_policy = normalize_rgf_parallel_policy(
+            cfg.get("transport_rgf_parallel_policy", "auto")
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    try:
+        normalize_rgf_blas_backend(cfg.get("transport_rgf_blas_backend", "auto"))
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    sigma_backend = (
+        str(cfg.get("transport_rgf_full_finite_sigma_backend", "native")).strip().lower()
+        or "native"
+    )
+    if sigma_backend not in {"native", "kwant_exact"}:
+        raise click.UsageError(
+            "transport_rgf_full_finite_sigma_backend must be one of "
+            "['native','kwant_exact']."
+        )
+    validate_against_raw = cfg.get("transport_rgf_validate_against")
+    if validate_against_raw is None:
+        validate_against_raw = "kwant" if sigma_backend == "kwant_exact" else "none"
+    try:
+        validate_against = normalize_rgf_validate_against(validate_against_raw)
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    kwant_script_cfg = str(
+        cfg.get("transport_rgf_full_finite_kwant_script", "")
+    ).strip()
+    transport_axis = normalize_axis(
+        cfg.get("transport_axis", "x"),
+        field_name="transport_axis",
+    )
+    thickness_axis = normalize_axis(
+        cfg.get("thickness_axis", "z"),
+        field_name="thickness_axis",
+    )
+    if mode not in {"periodic_transverse", "full_finite"}:
+        raise click.UsageError(
+            "Current native RGF phase supports only transport_rgf_mode in "
+            "['periodic_transverse','full_finite']."
+        )
+    if transport_axis == thickness_axis:
+        raise click.UsageError(
+            "transport_axis and thickness_axis must differ for native RGF."
+        )
+    if mode == "periodic_transverse" and periodic_axis in {transport_axis, thickness_axis}:
+        raise click.UsageError(
+            "transport_rgf_periodic_axis must differ from transport_axis and thickness_axis "
+            "in periodic_transverse mode."
+        )
+    if mode == "full_finite":
+        if numerical_status not in {"phase2_experimental", "phase2_ready"}:
+            raise click.UsageError(
+                "transport_rgf_mode='full_finite' requires a phase-2 capable RGF router. "
+                "Re-run `wtec init` after updating the native engine."
+            )
+    disorder_strengths = cfg.get("disorder_strengths")
+    if not isinstance(disorder_strengths, list) or not disorder_strengths:
+        raise click.UsageError(
+            "transport_engine='rgf' requires an explicit disorder_strengths list."
+        )
+    for raw in disorder_strengths:
+        try:
+            if abs(float(raw)) > 1.0e-12:
+                if mode == "periodic_transverse":
+                    raise click.UsageError(
+                        "transport_rgf_mode='periodic_transverse' requires clean disorder_strengths "
+                        "because disorder breaks the periodic transverse reduction."
+                    )
+        except click.UsageError:
+            raise
+        except Exception:
+            raise click.UsageError(
+                "transport_engine='rgf' requires numeric disorder_strengths values."
+            )
+    if int(cfg.get("n_ensemble", 1)) <= 0:
+        raise click.UsageError(
+            "transport_engine='rgf' requires n_ensemble > 0."
+        )
+    if sigma_backend != "native":
+        raise click.UsageError(
+            "Native RGF execution is internal-only; "
+            "transport_rgf_full_finite_sigma_backend must remain 'native'."
+        )
+    if validate_against != "none":
+        raise click.UsageError(
+            "Native RGF execution is internal-only; "
+            "transport_rgf_validate_against must be 'none'."
+        )
+    if kwant_script_cfg:
+        raise click.UsageError(
+            "Native RGF no longer accepts transport_rgf_full_finite_kwant_script; "
+            "remove the external Kwant helper path."
+        )
+    if parallel_policy == "single_point" and mode == "periodic_transverse":
+        raise click.UsageError(
+            "transport_rgf_parallel_policy='single_point' is intended for full_finite runs. "
+            "Use 'auto' or 'throughput' for periodic_transverse."
+        )
+
+
 def _normalize_stage(stage: str | None) -> str | None:
     if stage is None:
         return None
@@ -3435,7 +4665,7 @@ def _normalize_stage(stage: str | None) -> str | None:
 
 
 def _checkpoint_file_for_cfg(cfg: dict) -> Path:
-    return Path.home() / ".wtec" / "checkpoints" / f"{cfg.get('name', 'run')}.json"
+    return _wtec_state_dir() / "checkpoints" / f"{cfg.get('name', 'run')}.json"
 
 
 def _checkpoint_hr_dat(cfg: dict) -> Path | None:
@@ -3601,7 +4831,7 @@ def _ensure_pes_reference_structure_from_mp(cfg: dict[str, Any]) -> str:
 
 def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
     stage_norm = _normalize_stage(stage)
-    workspace = Path.home() / ".wtec"
+    workspace = _wtec_state_dir()
     init_state = workspace / "init_state.json"
     if not init_state.exists():
         raise click.UsageError(
@@ -3626,6 +4856,7 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
     transport_only = (
         not resume and stage_norm in {"TRANSPORT", "ANALYSIS"} and hr_path is not None
     )
+    transport_backend = str(cfg.get("transport_backend", "qsub")).strip().lower() or "qsub"
 
     # Structural/material requirements
     require_structure = False
@@ -3641,7 +4872,10 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             require_structure = True
             require_material = True
 
-    _normalize_dft_track_config(cfg)
+    try:
+        _normalize_dft_track_config(cfg)
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
 
     material = cfg.get("material")
     structure = cfg.get("structure_file")
@@ -4034,14 +5268,44 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
     if "fermi_velocity_m_per_s" in cfg and cfg.get("fermi_velocity_m_per_s") is not None:
         if float(cfg.get("fermi_velocity_m_per_s")) <= 0:
             raise click.UsageError("fermi_velocity_m_per_s must be > 0 when provided.")
-    if "transport_n_layers_x" in cfg and int(cfg["transport_n_layers_x"]) < 2:
-        raise click.UsageError("transport_n_layers_x must be >= 2 for valid Kwant lead attachment.")
     if "transport_n_layers_y" in cfg and int(cfg["transport_n_layers_y"]) <= 0:
         raise click.UsageError("transport_n_layers_y must be > 0")
     if "transport_backend" in cfg:
         tb = str(cfg["transport_backend"]).strip().lower()
         if tb not in {"qsub", "local"}:
             raise click.UsageError("transport_backend must be one of ['qsub','local'].")
+    transport_backend = str(cfg.get("transport_backend", "qsub")).strip().lower() or "qsub"
+    init_state_payload = _load_init_state() or {}
+    try:
+        transport_engine = normalize_transport_engine(cfg.get("transport_engine", "auto"))
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    try:
+        transport_rgf_mode = normalize_rgf_mode(cfg.get("transport_rgf_mode", "periodic_transverse"))
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    try:
+        transport_rgf_periodic_axis = normalize_axis(
+            cfg.get("transport_rgf_periodic_axis", "y"),
+            field_name="transport_rgf_periodic_axis",
+        )
+    except ValueError as exc:
+        raise click.UsageError(str(exc))
+    resolved_transport_engine = resolve_transport_engine(
+        transport_engine,
+        cfg=cfg,
+        init_state=init_state_payload,
+        backend=transport_backend,
+    )
+    if resolved_transport_engine == "kwant":
+        if "transport_n_layers_x" in cfg and int(cfg["transport_n_layers_x"]) < 2:
+            raise click.UsageError(
+                "transport_n_layers_x must be >= 2 for valid Kwant lead attachment."
+            )
+    if resolved_transport_engine == "rgf" and transport_backend != "qsub":
+        raise click.UsageError(
+            "transport_engine='rgf' currently requires transport.backend='qsub'."
+        )
     if "transport_policy" in cfg:
         tp = str(cfg["transport_policy"]).strip().lower()
         if tp not in {"single_track", "dual_track_compare"}:
@@ -4054,13 +5318,44 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
         raise click.UsageError("transport_mpi_np must be >= 0 (0 means auto).")
     if "transport_threads" in cfg and int(cfg["transport_threads"]) < 0:
         raise click.UsageError("transport_threads must be >= 0 (0 means auto).")
+    if "transport_rgf_parallel_policy" in cfg:
+        try:
+            normalize_rgf_parallel_policy(cfg["transport_rgf_parallel_policy"])
+        except ValueError as exc:
+            raise click.UsageError(str(exc))
+    if "transport_rgf_threads_per_rank" in cfg:
+        raw_threads = cfg["transport_rgf_threads_per_rank"]
+        if isinstance(raw_threads, str) and raw_threads.strip().lower() == "auto":
+            pass
+        elif int(raw_threads) < 0:
+            raise click.UsageError(
+                "transport_rgf_threads_per_rank must be 'auto' or an integer >= 0 "
+                "(0 also means auto)."
+            )
+    if "transport_rgf_blas_backend" in cfg:
+        try:
+            normalize_rgf_blas_backend(cfg["transport_rgf_blas_backend"])
+        except ValueError as exc:
+            raise click.UsageError(str(exc))
+    if "transport_rgf_validate_against" in cfg:
+        try:
+            normalize_rgf_validate_against(cfg["transport_rgf_validate_against"])
+        except ValueError as exc:
+            raise click.UsageError(str(exc))
     if "transport_kwant_task_workers" in cfg and int(cfg["transport_kwant_task_workers"]) < 0:
         raise click.UsageError("transport_kwant_task_workers must be >= 0 (0 means auto).")
-    if "transport_kwant_mode" in cfg:
+    if "transport_mumps_nrhs" in cfg and cfg["transport_mumps_nrhs"] is not None:
+        if int(cfg["transport_mumps_nrhs"]) <= 0:
+            raise click.UsageError("transport_mumps_nrhs must be > 0 when set.")
+    if "transport_mumps_ordering" in cfg and cfg["transport_mumps_ordering"] is not None:
+        if not str(cfg["transport_mumps_ordering"]).strip():
+            raise click.UsageError("transport_mumps_ordering must be a non-empty string when set.")
+    if resolved_transport_engine == "kwant" and "transport_kwant_mode" in cfg:
         km = str(cfg["transport_kwant_mode"]).strip().lower()
-        if km not in {"auto", "sequential", "task_parallel"}:
+        if km not in {"auto", "sequential", "task_parallel", "periodic_y", "periodic_clean_y"}:
             raise click.UsageError(
-                "transport_kwant_mode must be one of ['auto','sequential','task_parallel']."
+                "transport_kwant_mode must be one of "
+                "['auto','sequential','task_parallel','periodic_y','periodic_clean_y']."
             )
     if "runtime_logging_detail" in cfg:
         ld = str(cfg["runtime_logging_detail"]).strip().lower()
@@ -4070,6 +5365,15 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             )
     if "runtime_logging_heartbeat_seconds" in cfg and int(cfg["runtime_logging_heartbeat_seconds"]) <= 0:
         raise click.UsageError("runtime_logging_heartbeat_seconds must be > 0.")
+    if resolved_transport_engine == "kwant" and (stage_norm is None or stage_norm in {"TRANSPORT", "ANALYSIS"}):
+        _enforce_transport_mumps_from_init_state(cfg, backend=transport_backend)
+    if resolved_transport_engine == "rgf" and (stage_norm is None or stage_norm in {"TRANSPORT", "ANALYSIS"}):
+        _enforce_transport_rgf_from_init_state(
+            cfg,
+            backend=transport_backend,
+            mode=transport_rgf_mode,
+            periodic_axis=transport_rgf_periodic_axis,
+        )
     topo_cfg = cfg.get("topology")
     if topo_cfg is not None:
         if not isinstance(topo_cfg, dict):
@@ -4099,10 +5403,23 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             raise click.UsageError("topology.max_concurrent_variant_dft_jobs must be > 0.")
         if "arc_engine" in topo_cfg:
             ae = str(topo_cfg["arc_engine"]).strip().lower()
-            if ae not in {"wannierberri", "wannierberri_strict", "wb_strict", "kwant", "siesta_slab_ldos"}:
+            if ae not in {
+                "wannierberri",
+                "wannierberri_strict",
+                "wb_strict",
+                "kwant",
+                "siesta_slab_ldos",
+                "hybrid_adaptive",
+                "hybrid",
+                "adaptive_hybrid",
+                "tb_kresolved_adaptive",
+                "adaptive_tb_kresolved",
+                "adaptive",
+            }:
                 raise click.UsageError(
                     "topology.arc_engine must be one of "
-                    "['wannierberri','wannierberri_strict','wb_strict','kwant','siesta_slab_ldos']."
+                    "['wannierberri','wannierberri_strict','wb_strict','kwant',"
+                    "'siesta_slab_ldos','hybrid_adaptive','tb_kresolved_adaptive']."
                 )
         if "arc_allow_proxy_fallback" in topo_cfg and not isinstance(
             topo_cfg.get("arc_allow_proxy_fallback"), bool
@@ -4135,6 +5452,48 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                     "['tb_kresolved','tb_surface_kresolved','kresolved',"
                     "'kwant_proxy','none','off','disabled','false','no']."
                 )
+        if "adaptive_k" in topo_cfg:
+            akcfg = topo_cfg.get("adaptive_k")
+            if not isinstance(akcfg, dict):
+                raise click.UsageError("topology.adaptive_k must be an object when provided.")
+            if "enabled" in akcfg and not isinstance(akcfg.get("enabled"), bool):
+                raise click.UsageError("topology.adaptive_k.enabled must be a boolean.")
+            _validate_axis_value(akcfg.get("surface_axis"), "topology.adaptive_k.surface_axis")
+            for key in ("global_kmesh_xy", "local_kmesh_xy", "fallback_global_refine_kmesh_xy"):
+                if key in akcfg:
+                    vv = akcfg.get(key)
+                    if not isinstance(vv, (list, tuple)) or len(vv) != 2:
+                        raise click.UsageError(f"topology.adaptive_k.{key} must be a 2-element integer list.")
+                    if int(vv[0]) <= 0 or int(vv[1]) <= 0:
+                        raise click.UsageError(f"topology.adaptive_k.{key} entries must be > 0.")
+            if "window_radius_frac_xy" in akcfg:
+                rr = akcfg.get("window_radius_frac_xy")
+                if not isinstance(rr, (list, tuple)) or len(rr) != 2:
+                    raise click.UsageError(
+                        "topology.adaptive_k.window_radius_frac_xy must be a 2-element numeric list."
+                    )
+                if float(rr[0]) <= 0.0 or float(rr[1]) <= 0.0:
+                    raise click.UsageError("topology.adaptive_k.window_radius_frac_xy entries must be > 0.")
+            for key in ("energy_window_ev", "hotspot_gap_max_ev", "dedup_radius_frac"):
+                if key in akcfg and float(akcfg.get(key)) <= 0.0:
+                    raise click.UsageError(f"topology.adaptive_k.{key} must be > 0.")
+            if "max_hotspots" in akcfg and int(akcfg.get("max_hotspots")) <= 0:
+                raise click.UsageError("topology.adaptive_k.max_hotspots must be > 0.")
+            if "min_hotspots" in akcfg and int(akcfg.get("min_hotspots")) <= 0:
+                raise click.UsageError("topology.adaptive_k.min_hotspots must be > 0.")
+            if (
+                "max_hotspots" in akcfg
+                and "min_hotspots" in akcfg
+                and int(akcfg.get("min_hotspots")) > int(akcfg.get("max_hotspots"))
+            ):
+                raise click.UsageError(
+                    "topology.adaptive_k.min_hotspots cannot exceed topology.adaptive_k.max_hotspots."
+                )
+            if "require_inplane_transport" in akcfg and not isinstance(
+                akcfg.get("require_inplane_transport"),
+                bool,
+            ):
+                raise click.UsageError("topology.adaptive_k.require_inplane_transport must be a boolean.")
         if "node_method" in topo_cfg:
             nm = str(topo_cfg["node_method"]).strip().lower()
             if nm not in {"proxy", "berry_flux", "wannierberri_flux"}:
@@ -4258,10 +5617,23 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                     raise click.UsageError("topology.tiering.screen must be an object when provided.")
                 if "arc_engine" in screen_cfg:
                     ae = str(screen_cfg.get("arc_engine", "")).strip().lower()
-                    if ae not in {"wannierberri", "wannierberri_strict", "wb_strict", "kwant", "siesta_slab_ldos"}:
+                    if ae not in {
+                        "wannierberri",
+                        "wannierberri_strict",
+                        "wb_strict",
+                        "kwant",
+                        "siesta_slab_ldos",
+                        "hybrid_adaptive",
+                        "hybrid",
+                        "adaptive_hybrid",
+                        "tb_kresolved_adaptive",
+                        "adaptive_tb_kresolved",
+                        "adaptive",
+                    }:
                         raise click.UsageError(
                             "topology.tiering.screen.arc_engine must be one of "
-                            "['wannierberri','wannierberri_strict','wb_strict','kwant','siesta_slab_ldos']."
+                            "['wannierberri','wannierberri_strict','wb_strict','kwant',"
+                            "'siesta_slab_ldos','hybrid_adaptive','tb_kresolved_adaptive']."
                         )
                 if "node_method" in screen_cfg:
                     nm = str(screen_cfg.get("node_method", "")).strip().lower()
@@ -4316,14 +5688,14 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 raise click.UsageError(
                     "strict run_profile forbids topology.arc_allow_proxy_fallback=true."
                 )
-            arc_engine = str(topo_cfg.get("arc_engine", "siesta_slab_ldos")).strip().lower()
+            arc_engine = str(topo_cfg.get("arc_engine", "hybrid_adaptive")).strip().lower()
             node_method = str(topo_cfg.get("node_method", "wannierberri_flux")).strip().lower()
             if node_method == "proxy":
                 raise click.UsageError("strict run_profile forbids topology.node_method='proxy'.")
             if arc_engine in {"kwant", "wannierberri"}:
                 raise click.UsageError(
                     "strict run_profile requires non-proxy arc engine "
-                    "('siesta_slab_ldos' or strict WannierBerri mode)."
+                    "('hybrid_adaptive', 'siesta_slab_ldos', or strict WannierBerri mode)."
                 )
             autogen_mode = str(
                 topo_cfg.get("siesta_slab_ldos_autogen", "tb_kresolved")
@@ -4333,6 +5705,48 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                     "strict run_profile forbids topology.siesta_slab_ldos_autogen='kwant_proxy'. "
                     "Use 'tb_kresolved' or provide explicit slab LDOS JSON payloads."
                 )
+            if any(int(v) < 20 for v in topo_cfg.get("coarse_kmesh", [20, 20, 20])):
+                raise click.UsageError(
+                    "strict run_profile requires topology.kmesh.coarse >= [20,20,20]."
+                )
+            if any(int(v) < 7 for v in topo_cfg.get("refine_kmesh", [7, 7, 7])):
+                raise click.UsageError(
+                    "strict run_profile requires topology.kmesh.refine >= [7,7,7]."
+                )
+            adaptive_cfg = topo_cfg.get("adaptive_k", {})
+            if not isinstance(adaptive_cfg, dict):
+                adaptive_cfg = {}
+            if arc_engine in {"hybrid_adaptive", "hybrid", "adaptive_hybrid"}:
+                gxy = adaptive_cfg.get("global_kmesh_xy", [16, 16])
+                lxy = adaptive_cfg.get("local_kmesh_xy", [48, 48])
+                fxy = adaptive_cfg.get("fallback_global_refine_kmesh_xy", [40, 40])
+                if int(gxy[0]) < 16 or int(gxy[1]) < 16:
+                    raise click.UsageError(
+                        "strict run_profile requires topology.adaptive_k.global_kmesh_xy >= [16,16]."
+                    )
+                if int(lxy[0]) < 48 or int(lxy[1]) < 48:
+                    raise click.UsageError(
+                        "strict run_profile requires topology.adaptive_k.local_kmesh_xy >= [48,48]."
+                    )
+                if int(fxy[0]) < 40 or int(fxy[1]) < 40:
+                    raise click.UsageError(
+                        "strict run_profile requires topology.adaptive_k.fallback_global_refine_kmesh_xy >= [40,40]."
+                    )
+                if float(adaptive_cfg.get("energy_window_ev", 0.12)) > 0.15:
+                    raise click.UsageError(
+                        "strict run_profile requires topology.adaptive_k.energy_window_ev <= 0.15."
+                    )
+                if str(adaptive_cfg.get("surface_axis", "z")).strip().lower() != "z":
+                    raise click.UsageError(
+                        "strict run_profile currently requires topology.adaptive_k.surface_axis='z'."
+                    )
+                if bool(adaptive_cfg.get("require_inplane_transport", True)):
+                    axis_primary = str(topo_cfg.get("transport_axis_primary", "x")).strip().lower()
+                    if axis_primary not in {"x", "y"}:
+                        raise click.UsageError(
+                            "strict run_profile with adaptive in-plane transport requires "
+                            "topology.transport_axis_primary in ['x','y']."
+                        )
             if str(topo_cfg.get("backend", "qsub")).strip().lower() != "qsub":
                 raise click.UsageError("strict run_profile requires topology.backend='qsub'.")
             tiering_cfg = topo_cfg.get("tiering")
@@ -4385,19 +5799,33 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             )
 
     # Determine if cluster checks are required before this run starts
+    local_full_reuse = (
+        not resume
+        and stage_norm is None
+        and hr_path is not None
+        and _local_runtime_backends_only(cfg)
+    )
     cluster_required = False
-    if resume or stage_norm is None:
+    if resume:
         cluster_required = True
+    elif stage_norm is None:
+        cluster_required = not local_full_reuse
     elif stage_norm in {"DFT_SCF", "DFT_NSCF", "WANNIER90"}:
         cluster_required = True
     elif stage_norm in {"TRANSPORT", "ANALYSIS"} and not transport_only:
         # Falls back to DFT/Wannier generation if hr_dat isn't provided.
         cluster_required = True
 
+    if transport_only and transport_backend == "qsub":
+        cluster_required = True
+
     if not cluster_required:
         if transport_only:
             source = "config hr_dat_path" if hr_cfg else "checkpoint hr_dat"
             msg = f"[preflight] OK (transport-only using {source})"
+        elif local_full_reuse:
+            source = "config hr_dat_path" if hr_cfg else "checkpoint hr_dat"
+            msg = f"[preflight] OK (local full run using {source})"
         else:
             msg = f"[preflight] OK (local stage={stage_norm or 'INIT'})"
         click.echo(click.style(msg, fg="green"))
@@ -4446,8 +5874,21 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
             merged_abacus = dict(cfg["dft"]["abacus"])
             merged_abacus.update(abacus_cfg)
             abacus_cfg = merged_abacus
+        siesta_cfg = cfg.get("dft_siesta", {})
+        if not isinstance(siesta_cfg, dict):
+            siesta_cfg = {}
+        if isinstance(cfg.get("dft"), dict) and isinstance(cfg["dft"].get("siesta"), dict):
+            merged_siesta = dict(cfg["dft"]["siesta"])
+            merged_siesta.update(siesta_cfg)
+            siesta_cfg = merged_siesta
+        siesta_spin_orbit = bool(siesta_cfg.get("spin_orbit", True))
+        siesta_pseudo_dir = cluster_cfg.resolved_siesta_pseudo_dir(
+            spin_orbit=siesta_spin_orbit,
+            explicit=str(siesta_cfg.get("pseudo_dir", "")).strip(),
+        )
         vasp_exec = str(vasp_cfg.get("executable", "vasp_std")).strip() or "vasp_std"
         abacus_exec = str(abacus_cfg.get("executable", "abacus")).strip() or "abacus"
+        transport_engine = str(cfg.get("transport_engine", "auto")).strip().lower() or "auto"
         required_execs: list[str] = []
         if dft_mode == "hybrid_qe_ref_siesta_variants":
             required_execs = ["pw.x", "pw2wannier90.x", "siesta", "wannier90.x"]
@@ -4528,10 +5969,10 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 qe_pp = sorted(set(preset.pseudopots.values()))
                 si_pp = sorted(set(preset.siesta_pseudopots.values()))
                 jm.ensure_remote_files(cluster_cfg.qe_pseudo_dir, qe_pp)
-                jm.ensure_remote_files(cluster_cfg.siesta_pseudo_dir, si_pp)
+                jm.ensure_remote_files(siesta_pseudo_dir, si_pp)
                 pseudo_dir_report = (
                     f"qe:{cluster_cfg.qe_pseudo_dir}, "
-                    f"siesta:{cluster_cfg.siesta_pseudo_dir}"
+                    f"siesta:{siesta_pseudo_dir}"
                 )
             elif dft_mode == "dual_family":
                 reports: list[str] = []
@@ -4547,8 +5988,8 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                     reports.append(f"vasp:{vasp_pseudo_dir}")
                 if variant_dft_engine == "siesta":
                     si_pp = sorted(set(preset.siesta_pseudopots.values()))
-                    jm.ensure_remote_files(cluster_cfg.siesta_pseudo_dir, si_pp)
-                    reports.append(f"siesta:{cluster_cfg.siesta_pseudo_dir}")
+                    jm.ensure_remote_files(siesta_pseudo_dir, si_pp)
+                    reports.append(f"siesta:{siesta_pseudo_dir}")
                 if variant_dft_engine == "abacus":
                     abacus_pseudo_dir = str(abacus_cfg.get("pseudo_dir") or cluster_cfg.abacus_pseudo_dir)
                     abacus_orb_dir = str(abacus_cfg.get("orbital_dir") or cluster_cfg.abacus_orbital_dir)
@@ -4583,13 +6024,13 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 pseudo_dir_report = f"{abacus_pseudo_dir}, {abacus_orb_dir}"
             else:
                 required_pp = sorted(set(preset.siesta_pseudopots.values()))
-                jm.ensure_remote_files(cluster_cfg.siesta_pseudo_dir, required_pp)
-                pseudo_dir_report = cluster_cfg.siesta_pseudo_dir
+                jm.ensure_remote_files(siesta_pseudo_dir, required_pp)
+                pseudo_dir_report = siesta_pseudo_dir
         else:
             if dft_mode == "hybrid_qe_ref_siesta_variants":
                 pseudo_dir_report = (
                     f"qe:{cluster_cfg.qe_pseudo_dir}, "
-                    f"siesta:{cluster_cfg.siesta_pseudo_dir}"
+                    f"siesta:{siesta_pseudo_dir}"
                 )
             elif dft_mode == "dual_family":
                 reports: list[str] = []
@@ -4598,7 +6039,7 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 if dft_engine == "vasp":
                     reports.append(f"vasp:{str(vasp_cfg.get('pseudo_dir') or cluster_cfg.vasp_pseudo_dir)}")
                 if variant_dft_engine == "siesta":
-                    reports.append(f"siesta:{cluster_cfg.siesta_pseudo_dir}")
+                    reports.append(f"siesta:{siesta_pseudo_dir}")
                 if variant_dft_engine == "abacus":
                     reports.append(f"abacus_pseudo:{str(abacus_cfg.get('pseudo_dir') or cluster_cfg.abacus_pseudo_dir)}")
                     reports.append(f"abacus_orbital:{str(abacus_cfg.get('orbital_dir') or cluster_cfg.abacus_orbital_dir)}")
@@ -4607,7 +6048,7 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                 if dft_engine == "qe":
                     pseudo_dir_report = cluster_cfg.qe_pseudo_dir
                 elif dft_engine == "siesta":
-                    pseudo_dir_report = cluster_cfg.siesta_pseudo_dir
+                    pseudo_dir_report = siesta_pseudo_dir
                 elif dft_engine == "vasp":
                     pseudo_dir_report = str(vasp_cfg.get("pseudo_dir") or cluster_cfg.vasp_pseudo_dir)
                 else:
@@ -4615,6 +6056,23 @@ def _run_preflight(cfg: dict, *, resume: bool, stage: str | None) -> None:
                         f"{str(abacus_cfg.get('pseudo_dir') or cluster_cfg.abacus_pseudo_dir)}, "
                         f"{str(abacus_cfg.get('orbital_dir') or cluster_cfg.abacus_orbital_dir)}"
                     )
+        if preset is not None and siesta_spin_orbit and (
+            dft_mode == "hybrid_qe_ref_siesta_variants"
+            or dft_engine == "siesta"
+            or variant_dft_engine == "siesta"
+        ):
+            si_pp = sorted(set(preset.siesta_pseudopots.values()))
+            if not _remote_siesta_psml_supports_soc(
+                ssh,
+                pseudo_dir=siesta_pseudo_dir,
+                filenames=si_pp,
+                modules=cluster_cfg.modules,
+                bin_dirs=cluster_cfg.bin_dirs,
+            ):
+                raise click.UsageError(
+                    "SIESTA spin-orbit run resolved to a scalar-relativistic PSML directory. "
+                    "Set TOPOSLAB_SIESTA_SOC_PSEUDO_DIR to a fully-relativistic PSML cache."
+                )
         queue_used = jm.resolve_queue(
             cluster_cfg.pbs_queue,
             fallback_order=cluster_cfg.pbs_queue_priority,
@@ -4646,13 +6104,33 @@ def _run_requires_cluster(cfg: dict, *, resume: bool, stage: str | None) -> bool
     transport_only = (
         not resume and stage_norm in {"TRANSPORT", "ANALYSIS"} and hr_path is not None
     )
-    if resume or stage_norm is None:
+    if resume:
+        return True
+    if (
+        stage_norm is None
+        and hr_path is not None
+        and _local_runtime_backends_only(cfg)
+    ):
+        return False
+    if stage_norm is None:
         return True
     if stage_norm in {"DFT_SCF", "DFT_NSCF", "WANNIER90"}:
         return True
     if stage_norm in {"TRANSPORT", "ANALYSIS"} and not transport_only:
         return True
     return False
+
+
+def _local_runtime_backends_only(cfg: dict) -> bool:
+    transport_backend = str(cfg.get("transport_backend", "qsub")).strip().lower() or "qsub"
+    if transport_backend != "local":
+        return False
+    topo_cfg = cfg.get("topology")
+    if isinstance(topo_cfg, dict) and bool(topo_cfg.get("enabled", True)):
+        topo_backend = str(topo_cfg.get("backend", "qsub")).strip().lower() or "qsub"
+        if topo_backend != "local":
+            return False
+    return True
 
 
 def _merge_runtime_cluster_interactive(
@@ -4858,6 +6336,8 @@ def _normalize_dft_track_config(
     lcao_track = lcao_track if isinstance(lcao_track, dict) else {}
     anchor_tbl = dft_tbl.get("anchor_transfer", {})
     anchor_tbl = anchor_tbl if isinstance(anchor_tbl, dict) else {}
+    transport_tbl = cfg.get("transport", {})
+    transport_tbl = transport_tbl if isinstance(transport_tbl, dict) else {}
 
     mode_raw = cfg.get("dft_mode")
     if mode_raw is None:
@@ -4989,6 +6469,72 @@ def _normalize_dft_track_config(
     anchor_cfg["reuse_existing"] = bool(anchor_cfg.get("reuse_existing", True))
     cfg["dft_anchor_transfer"] = anchor_cfg
 
+    transport_engine_raw = cfg.get("transport_engine")
+    if transport_engine_raw is None:
+        transport_engine_raw = transport_tbl.get("engine")
+    cfg["transport_engine"] = normalize_transport_engine(transport_engine_raw or "auto")
+
+    transport_rgf_mode_raw = cfg.get("transport_rgf_mode")
+    if transport_rgf_mode_raw is None:
+        transport_rgf_mode_raw = transport_tbl.get("rgf_mode")
+    cfg["transport_rgf_mode"] = normalize_rgf_mode(transport_rgf_mode_raw)
+
+    transport_rgf_periodic_axis_raw = cfg.get("transport_rgf_periodic_axis")
+    if transport_rgf_periodic_axis_raw is None:
+        transport_rgf_periodic_axis_raw = transport_tbl.get("rgf_periodic_axis")
+    cfg["transport_rgf_periodic_axis"] = normalize_axis(
+        transport_rgf_periodic_axis_raw or "y",
+        field_name="transport_rgf_periodic_axis",
+    )
+    transport_rgf_sigma_backend_raw = cfg.get("transport_rgf_full_finite_sigma_backend")
+    if transport_rgf_sigma_backend_raw is None:
+        transport_rgf_sigma_backend_raw = transport_tbl.get("rgf_full_finite_sigma_backend")
+    cfg["transport_rgf_full_finite_sigma_backend"] = (
+        str(transport_rgf_sigma_backend_raw or "native").strip().lower() or "native"
+    )
+    transport_rgf_kwant_script_raw = cfg.get("transport_rgf_full_finite_kwant_script")
+    if transport_rgf_kwant_script_raw is None:
+        transport_rgf_kwant_script_raw = transport_tbl.get("rgf_full_finite_kwant_script")
+    cfg["transport_rgf_full_finite_kwant_script"] = (
+        str(transport_rgf_kwant_script_raw or "").strip()
+    )
+    transport_rgf_parallel_policy_raw = cfg.get("transport_rgf_parallel_policy")
+    if transport_rgf_parallel_policy_raw is None:
+        transport_rgf_parallel_policy_raw = transport_tbl.get("rgf_parallel_policy")
+    cfg["transport_rgf_parallel_policy"] = normalize_rgf_parallel_policy(
+        transport_rgf_parallel_policy_raw or "auto"
+    )
+    transport_rgf_threads_per_rank_raw = cfg.get("transport_rgf_threads_per_rank")
+    if transport_rgf_threads_per_rank_raw is None:
+        transport_rgf_threads_per_rank_raw = transport_tbl.get("rgf_threads_per_rank")
+    if isinstance(transport_rgf_threads_per_rank_raw, str):
+        raw_threads_token = transport_rgf_threads_per_rank_raw.strip().lower()
+    else:
+        raw_threads_token = str(transport_rgf_threads_per_rank_raw or "").strip().lower()
+    cfg["transport_rgf_threads_per_rank"] = (
+        "auto"
+        if raw_threads_token in {"", "auto", "0"}
+        else int(transport_rgf_threads_per_rank_raw)
+    )
+    transport_rgf_blas_backend_raw = cfg.get("transport_rgf_blas_backend")
+    if transport_rgf_blas_backend_raw is None:
+        transport_rgf_blas_backend_raw = transport_tbl.get("rgf_blas_backend")
+    cfg["transport_rgf_blas_backend"] = normalize_rgf_blas_backend(
+        transport_rgf_blas_backend_raw or "auto"
+    )
+    transport_rgf_validate_against_raw = cfg.get("transport_rgf_validate_against")
+    if transport_rgf_validate_against_raw is None:
+        transport_rgf_validate_against_raw = transport_tbl.get("rgf_validate_against")
+    if transport_rgf_validate_against_raw is None:
+        transport_rgf_validate_against_raw = (
+            "kwant"
+            if cfg["transport_rgf_full_finite_sigma_backend"] == "kwant_exact"
+            else "none"
+        )
+    cfg["transport_rgf_validate_against"] = normalize_rgf_validate_against(
+        transport_rgf_validate_against_raw or "none"
+    )
+
     # Backward-compatible runtime aliases used by existing internals.
     cfg["dft_engine"] = pes_engine
     cfg["dft_reference_engine"] = str(
@@ -5055,6 +6601,7 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
     topo_hr = topo.get("hr_grid", {}) if isinstance(topo.get("hr_grid"), dict) else {}
     topo_score = topo.get("score", {}) if isinstance(topo.get("score"), dict) else {}
     topo_tiering = topo.get("tiering", {}) if isinstance(topo.get("tiering"), dict) else {}
+    topo_adaptive = topo.get("adaptive_k", {}) if isinstance(topo.get("adaptive_k"), dict) else {}
     topo_transport_probe = (
         topo.get("transport_probe", {})
         if isinstance(topo.get("transport_probe"), dict)
@@ -5126,6 +6673,19 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
         )
     )
     lcao_source = str(lcao_track.get("source", "variants")).strip().lower() or "variants"
+    rgf_sigma_backend = (
+        str(transport.get("rgf_full_finite_sigma_backend", "native")).strip().lower()
+        or "native"
+    )
+    rgf_threads_per_rank_raw = transport.get("rgf_threads_per_rank", "auto")
+    rgf_threads_per_rank = (
+        "auto"
+        if str(rgf_threads_per_rank_raw).strip().lower() in {"", "auto", "0"}
+        else int(rgf_threads_per_rank_raw)
+    )
+    rgf_validate_against_raw = transport.get("rgf_validate_against")
+    if rgf_validate_against_raw is None:
+        rgf_validate_against_raw = "kwant" if rgf_sigma_backend == "kwant_exact" else "none"
 
     cfg: dict[str, Any] = {
         "name": run_name,
@@ -5263,6 +6823,7 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
         "base_seed": int(transport.get("base_seed", int(project.get("seed", 0)))),
         "transport_backend": str(transport.get("backend", "qsub")),
         "transport_policy": str(transport.get("policy", transport_policy_default)),
+        "transport_engine": normalize_transport_engine(transport.get("engine", "auto")),
         "transport_strict_qsub": bool(transport.get("strict_qsub", True)),
         "transport_walltime": str(transport.get("walltime", "00:30:00")),
         "transport_mpi_np": int(transport.get("mpi_np", 0)),
@@ -5271,6 +6832,40 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
         "transport_require_mumps": bool(transport.get("require_mumps", True)),
         "transport_kwant_task_workers": int(transport.get("kwant_task_workers", 0)),
         "transport_kwant_mode": str(transport.get("kwant_mode", "auto")).strip().lower() or "auto",
+        "transport_rgf_mode": normalize_rgf_mode(transport.get("rgf_mode", "periodic_transverse")),
+        "transport_rgf_periodic_axis": normalize_axis(
+            transport.get("rgf_periodic_axis", "y"),
+            field_name="transport_rgf_periodic_axis",
+        ),
+        "transport_rgf_parallel_policy": normalize_rgf_parallel_policy(
+            transport.get("rgf_parallel_policy", "auto")
+        ),
+        "transport_rgf_threads_per_rank": rgf_threads_per_rank,
+        "transport_rgf_blas_backend": normalize_rgf_blas_backend(
+            transport.get("rgf_blas_backend", "auto")
+        ),
+        "transport_rgf_validate_against": normalize_rgf_validate_against(
+            rgf_validate_against_raw
+        ),
+        "transport_rgf_full_finite_sigma_backend": rgf_sigma_backend,
+        "transport_rgf_full_finite_kwant_script": (
+            str(transport.get("rgf_full_finite_kwant_script", "")).strip()
+        ),
+        "transport_mumps_nrhs": (
+            int(transport.get("mumps_nrhs"))
+            if transport.get("mumps_nrhs", None) is not None
+            else None
+        ),
+        "transport_mumps_ordering": (
+            str(transport.get("mumps_ordering")).strip()
+            if transport.get("mumps_ordering", None) is not None
+            else None
+        ),
+        "transport_mumps_sparse_rhs": (
+            bool(transport.get("mumps_sparse_rhs"))
+            if transport.get("mumps_sparse_rhs", None) is not None
+            else None
+        ),
         "transport_cluster_python_exe": str(
             transport.get("cluster_python_exe", cluster.get("cluster_python_exe", "python3"))
         ),
@@ -5298,7 +6893,7 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
             "transport_axis_aux": str(topo.get("transport_axis_aux", "z")),
             "n_layers_x": int(topo.get("n_layers_x", int(transport.get("transport_n_layers_x", 4)))),
             "n_layers_y": int(topo.get("n_layers_y", int(transport.get("transport_n_layers_y", 4)))),
-            "arc_engine": str(topo.get("arc_engine", "siesta_slab_ldos")),
+            "arc_engine": str(topo.get("arc_engine", "hybrid_adaptive")),
             "arc_allow_proxy_fallback": bool(topo.get("arc_allow_proxy_fallback", False)),
             "arc_kmesh_xy": [
                 int(v)
@@ -5313,6 +6908,50 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
                 topo.get("siesta_slab_ldos_autogen", "tb_kresolved")
             ).strip().lower()
             or "tb_kresolved",
+            "adaptive_k": {
+                "enabled": bool(topo_adaptive.get("enabled", True)),
+                "surface_axis": str(topo_adaptive.get("surface_axis", "z")).strip().lower() or "z",
+                "global_kmesh_xy": [
+                    int(v)
+                    for v in (
+                        topo_adaptive.get("global_kmesh_xy")
+                        if isinstance(topo_adaptive.get("global_kmesh_xy"), (list, tuple))
+                        else [16, 16]
+                    )
+                ][:2],
+                "local_kmesh_xy": [
+                    int(v)
+                    for v in (
+                        topo_adaptive.get("local_kmesh_xy")
+                        if isinstance(topo_adaptive.get("local_kmesh_xy"), (list, tuple))
+                        else [48, 48]
+                    )
+                ][:2],
+                "fallback_global_refine_kmesh_xy": [
+                    int(v)
+                    for v in (
+                        topo_adaptive.get("fallback_global_refine_kmesh_xy")
+                        if isinstance(topo_adaptive.get("fallback_global_refine_kmesh_xy"), (list, tuple))
+                        else [40, 40]
+                    )
+                ][:2],
+                "window_radius_frac_xy": [
+                    float(v)
+                    for v in (
+                        topo_adaptive.get("window_radius_frac_xy")
+                        if isinstance(topo_adaptive.get("window_radius_frac_xy"), (list, tuple))
+                        else [0.06, 0.06]
+                    )
+                ][:2],
+                "energy_window_ev": float(topo_adaptive.get("energy_window_ev", 0.12)),
+                "hotspot_gap_max_ev": float(topo_adaptive.get("hotspot_gap_max_ev", 0.03)),
+                "max_hotspots": int(topo_adaptive.get("max_hotspots", 8)),
+                "min_hotspots": int(topo_adaptive.get("min_hotspots", 4)),
+                "dedup_radius_frac": float(topo_adaptive.get("dedup_radius_frac", 0.03)),
+                "require_inplane_transport": bool(
+                    topo_adaptive.get("require_inplane_transport", True)
+                ),
+            },
             "node_method": str(topo.get("node_method", "wannierberri_flux")),
             "hr_scope": str(topo.get("hr_scope", "per_variant")),
             "caveat_reuse_global_hr_dat": bool(topo.get("caveat_reuse_global_hr_dat", False)),
@@ -5325,7 +6964,7 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
                 "w_transport": float(topo_score.get("w_transport", 0.30)),
             },
             "transport_probe": {
-                "enabled": bool(topo_transport_probe.get("enabled", True)),
+                "enabled": bool(topo_transport_probe.get("enabled", False)),
                 "n_ensemble": int(topo_transport_probe.get("n_ensemble", 1)),
                 "disorder_strength": float(
                     topo_transport_probe.get("disorder_strength", 0.0)
@@ -5369,7 +7008,7 @@ def _build_cfg_from_master_toml(data: dict[str, Any], *, source_path: Path) -> d
                     topo_tiering.get("selection_metric", "S_total")
                 ).strip() or "S_total",
                 "screen": {
-                    "arc_engine": str(topo_tiering_screen.get("arc_engine", "siesta_slab_ldos")).strip().lower() or "siesta_slab_ldos",
+                    "arc_engine": str(topo_tiering_screen.get("arc_engine", "hybrid_adaptive")).strip().lower() or "hybrid_adaptive",
                     "node_method": str(topo_tiering_screen.get("node_method", "wannierberri_flux")).strip().lower() or "wannierberri_flux",
                     "coarse_kmesh": _int_list3(
                         topo_tiering_screen.get("coarse_kmesh"),
@@ -5829,6 +7468,8 @@ def _write_run_report(cfg: dict[str, Any]) -> tuple[Path, Path] | None:
             topo_summary = topo_payload.get("summary", {}) if isinstance(topo_payload, dict) else {}
         except Exception:
             topo_summary = {}
+    if not topo_summary and isinstance(outputs.get("topology_summary"), dict):
+        topo_summary = dict(outputs.get("topology_summary") or {})
 
     transport_compare_summary: dict[str, Any] = {}
     transport_compare_json = run_dir / "report" / "transport_compare.json"
@@ -6250,7 +7891,7 @@ def status(job_id: str | None, show_all: bool) -> None:
                 f"source={details.get('source')})"
             )
         elif show_all:
-            checkpoint_dir = Path.home() / ".wtec" / "checkpoints"
+            checkpoint_dir = _wtec_state_dir() / "checkpoints"
             for f in sorted(checkpoint_dir.glob("*.json")):
                 data = json.loads(f.read_text())
                 jid = data.get("last_job_id", "—")
@@ -6420,6 +8061,544 @@ def _render_siesta_benchmark_fdf(
         ]
     )
     return "\n".join(lines)
+
+
+def _nanowire_benchmark_root(output_dir: str) -> Path:
+    if str(output_dir).strip():
+        return Path(output_dir).expanduser().resolve()
+    return (
+        _wtec_state_dir()
+        / "references"
+        / "nanowire_benchmarks"
+        / "mp-1018028"
+        / "article_tis_v1"
+    ).resolve()
+
+
+def _max_triplet(raw: Any, minimum: tuple[int, int, int]) -> list[int]:
+    vals = _int_list3(raw, default=minimum)
+    return [max(int(vals[i]), int(minimum[i])) for i in range(3)]
+
+
+def _build_tis_benchmark_source_cfg(
+    *,
+    base_cfg: dict[str, Any],
+    benchmark_root: Path,
+    structure_file: str,
+    source_name: str,
+    custom_projections: list[str] | None,
+    live_log: bool,
+    log_poll_interval: int,
+    stale_log_seconds: int,
+) -> dict[str, Any]:
+    import os
+
+    from wtec.config.materials import get_material
+    from wtec.transport.nanowire_benchmark import (
+        NANOWIRE_BENCHMARK_MATERIAL,
+        NANOWIRE_BENCHMARK_MP_ID,
+    )
+
+    preset = get_material(NANOWIRE_BENCHMARK_MATERIAL)
+    cfg = dict(base_cfg)
+    cfg["_runtime_config_dir"] = str(benchmark_root)
+    cfg["_runtime_live_log"] = bool(live_log)
+    cfg["_runtime_log_poll_interval"] = int(log_poll_interval)
+    cfg["_runtime_stale_log_seconds"] = int(stale_log_seconds)
+    cfg["name"] = str(source_name).strip() or "nanowire_benchmark_source_mp1018028"
+    cfg["material"] = NANOWIRE_BENCHMARK_MATERIAL
+    cfg["run_profile"] = "smoke"
+    cfg["run_dir"] = str((benchmark_root / "source_run").resolve())
+    cfg["structure_file"] = str(Path(structure_file).expanduser().resolve())
+    cfg["dft_mode"] = "legacy_single"
+    cfg["dft_engine"] = "qe"
+    cfg["dft_pes_engine"] = "qe"
+    cfg["dft_lcao_engine"] = "qe"
+    cfg["dft_reference_engine"] = "qe"
+    cfg["dft_lcao_source"] = "variants"
+    cfg["dft_reuse_mode"] = "none"
+    cfg["dft_pes_reference_mp_id"] = NANOWIRE_BENCHMARK_MP_ID
+    cfg["dft_pes_reference_use_primitive"] = True
+    cfg["dft_pes_reference_structure_file"] = str(Path(structure_file).expanduser().resolve())
+    # The TiS supplementary transport workflow keeps a consistent SOC level of theory.
+    cfg["qe_noncolin"] = True
+    cfg["qe_lspinorb"] = True
+    current_qe_pseudo_dir = str(
+        cfg.get("qe_pseudo_dir") or os.environ.get("TOPOSLAB_QE_PSEUDO_DIR", "")
+    ).strip()
+    if current_qe_pseudo_dir:
+        rel_qe_pseudo_dir = current_qe_pseudo_dir.replace("/pbe/", "/rel-pbe/")
+        if rel_qe_pseudo_dir == current_qe_pseudo_dir:
+            rel_qe_pseudo_dir = current_qe_pseudo_dir.replace("/pbe", "/rel-pbe")
+        cfg["qe_pseudo_dir"] = rel_qe_pseudo_dir
+    cfg["qe_disable_symmetry"] = True
+    cfg["wannier_custom_projections"] = [str(v) for v in custom_projections] if custom_projections else None
+    cfg["kpoints_scf"] = _max_triplet(cfg.get("kpoints_scf"), preset.min_kmesh_scf)
+    cfg["kpoints_nscf"] = _max_triplet(cfg.get("kpoints_nscf"), preset.min_kmesh_nscf)
+    cfg["transport_backend"] = "qsub"
+    cfg["reuse_transport_results"] = False
+    return cfg
+
+
+def _first_float_list_value(mapping: dict[str, Any], key: str) -> float:
+    values = mapping.get(key, [])
+    if not isinstance(values, list) or not values:
+        raise RuntimeError(f"Missing transport field {key!r} in RGF benchmark result.")
+    return float(values[0])
+
+
+def _extract_single_transmission_from_rgf(results: dict[str, Any]) -> float:
+    thickness_scan = results.get("thickness_scan", {})
+    if not isinstance(thickness_scan, dict) or not thickness_scan:
+        raise RuntimeError("RGF benchmark result has no thickness_scan payload.")
+    first_key = next(iter(thickness_scan))
+    block = thickness_scan.get(first_key)
+    if not isinstance(block, dict):
+        raise RuntimeError("RGF benchmark thickness_scan block is invalid.")
+    return _first_float_list_value(block, "G_mean")
+
+
+def _load_benchmark_source_resume(benchmark_root: Path) -> tuple[Path, Path, float] | None:
+    manifest = benchmark_root / "source_artifacts.json"
+    if not manifest.exists():
+        return None
+    try:
+        data = json.loads(manifest.read_text())
+    except Exception:
+        return None
+    hr_path = Path(str(data.get("hr_dat", ""))).expanduser().resolve()
+    win_path = Path(str(data.get("win_path", ""))).expanduser().resolve()
+    fermi_ev = data.get("fermi_ev")
+    if not hr_path.exists() or not win_path.exists() or fermi_ev is None:
+        return None
+    return hr_path, win_path, float(fermi_ev)
+
+
+@main.command("benchmark-transport")
+@click.argument("config_file", required=False, type=click.Path(dir_okay=False))
+@click.option(
+    "--output-dir",
+    default="",
+    help="Local benchmark workspace. Default: .wtec/references/nanowire_benchmarks/mp-1018028",
+)
+@click.option("--queue", default="g4", show_default=True, help="PBS queue for benchmark submissions.")
+@click.option("--walltime", default="01:00:00", show_default=True, help="PBS walltime per benchmark job.")
+@click.option(
+    "--live-log/--no-live-log",
+    default=True,
+    help="Stream remote benchmark logs while jobs run.",
+)
+@click.option(
+    "--log-poll-interval",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Seconds between scheduler/log polling.",
+)
+@click.option(
+    "--stale-log-seconds",
+    type=int,
+    default=300,
+    show_default=True,
+    help="Warn if a benchmark job is RUNNING but logs do not grow for this long.",
+)
+def benchmark_transport(
+    config_file: str | None,
+    output_dir: str,
+    queue: str,
+    walltime: str,
+    live_log: bool,
+    log_poll_interval: int,
+    stale_log_seconds: int,
+) -> None:
+    """Generate and validate the TiS mp-1018028 nanowire transport benchmark."""
+    from wtec.transport.nanowire_benchmark import (
+        NANOWIRE_BENCHMARK_MP_ID,
+        NanowireBenchmarkSpec,
+        build_article_fit_summary,
+        compare_fit_summaries,
+        compare_reference_and_rgf,
+        compute_length_uc,
+        fit_rows_to_csv_lines,
+        prepare_canonicalized_inputs,
+        rows_to_csv_lines,
+    )
+    from wtec.transport.nanowire_benchmark_cluster import (
+        submit_kwant_nanowire_reference,
+    )
+    from wtec.wannier.parser import read_hr_dat
+    from wtec.rgf import effective_principal_layer_width
+    from wtec.workflow.orchestrator import TopoSlabWorkflow
+
+    config_path = _resolve_run_config_path(config_file)
+    _load_runtime_dotenv(str(config_path))
+    base_cfg = _load_run_config(config_path)
+    base_cfg["_runtime_config_dir"] = str(config_path.parent.resolve())
+
+    if log_poll_interval <= 0:
+        raise click.UsageError("--log-poll-interval must be > 0")
+    if stale_log_seconds <= 0:
+        raise click.UsageError("--stale-log-seconds must be > 0")
+
+    if queue:
+        _apply_env_updates_to_process({"TOPOSLAB_PBS_QUEUE": str(queue).strip()})
+
+    benchmark_root = _nanowire_benchmark_root(output_dir)
+    benchmark_root.mkdir(parents=True, exist_ok=True)
+    spec = NanowireBenchmarkSpec()
+
+    source_cfg_seed = {
+        "_runtime_config_dir": str(benchmark_root),
+        "mp_api_key": str(base_cfg.get("mp_api_key", "")).strip(),
+        "mp_api_key_env": str(base_cfg.get("mp_api_key_env", "MP_API_KEY")).strip() or "MP_API_KEY",
+        "material": spec.material,
+        "dft_pes_reference_mp_id": spec.mp_id,
+        "dft_pes_reference_use_primitive": True,
+    }
+    structure_file = _ensure_pes_reference_structure_from_mp(source_cfg_seed)
+    click.echo(click.style(f"[benchmark] source structure: {structure_file}", fg="cyan"))
+
+    summary: dict[str, Any] = {
+        "mp_id": spec.mp_id,
+        "material": spec.material,
+        "article_protocol": {
+            "transport_axis_crystal": "[001]",
+            "surface_of_interest": "(010)",
+            "axis_permutations": list(spec.axes),
+            "energies_rel_fermi_ev": [float(v) for v in spec.energies_ev],
+            "thicknesses_uc": [int(v) for v in spec.thicknesses_uc],
+            "fixed_width_uc": int(spec.fixed_width_uc),
+            "trim_exclude_thicknesses_uc": [int(v) for v in spec.trim_exclude_thicknesses_uc],
+        },
+        "models": {},
+    }
+    failed_targets: list[str] = []
+
+    source_python = str(
+        base_cfg.get(
+            "transport_cluster_python_exe",
+            base_cfg.get("topology", {}).get("cluster_python_exe", "python3")
+            if isinstance(base_cfg.get("topology"), dict)
+            else "python3",
+        )
+    ).strip() or "python3"
+
+    for model in spec.models:
+        model_root = benchmark_root / model.key
+        model_root.mkdir(parents=True, exist_ok=True)
+        source_cfg = _build_tis_benchmark_source_cfg(
+            base_cfg=base_cfg,
+            benchmark_root=model_root,
+            structure_file=structure_file,
+            source_name=f"nanowire_benchmark_source_{model.key}_{spec.mp_id}",
+            custom_projections=list(model.custom_projections),
+            live_log=live_log,
+            log_poll_interval=log_poll_interval,
+            stale_log_seconds=stale_log_seconds,
+        )
+        resumed = _load_benchmark_source_resume(model_root)
+        if resumed is not None:
+            hr_dat, win_path, fermi_ev_f = resumed
+            click.echo(
+                click.style(
+                    f"[benchmark] model={model.key}: reusing source artifacts {hr_dat}",
+                    fg="cyan",
+                )
+            )
+        else:
+            source_checkpoint = _checkpoint_file_for_cfg(source_cfg)
+            if source_checkpoint.exists():
+                source_checkpoint.unlink()
+            click.echo(click.style(f"[benchmark] model={model.key}: running QE→Wannier source build", fg="cyan"))
+            source_wf = TopoSlabWorkflow.from_config(source_cfg)
+            source_result = source_wf.run_stage("WANNIER90")
+            hr_dat = Path(str(source_result["hr_dat"])).expanduser().resolve()
+            fermi_ev = source_wf._state.get("outputs", {}).get("fermi_ev")
+            if fermi_ev is None:
+                raise click.ClickException(
+                    f"Benchmark source run for {model.key} completed without fermi_ev in checkpoint state."
+                )
+            fermi_ev_f = float(fermi_ev)
+            win_path = hr_dat.with_name(f"{spec.material}.win")
+            if not win_path.exists():
+                raise click.ClickException(f"Benchmark source run produced no .win file: {win_path}")
+            (model_root / "source_artifacts.json").write_text(
+                json.dumps(
+                    {
+                        "hr_dat": str(hr_dat),
+                        "win_path": str(win_path),
+                        "fermi_ev": float(fermi_ev_f),
+                        "model_key": model.key,
+                        "model_label": model.label,
+                        "custom_projections": list(model.custom_projections),
+                    },
+                    indent=2,
+                )
+            )
+
+        model_summary: dict[str, Any] = {
+            "label": model.label,
+            "custom_projections": list(model.custom_projections),
+            "primary_for_rgf": bool(model.primary_for_rgf),
+            "source_hr_dat": str(hr_dat),
+            "source_win_path": str(win_path),
+            "fermi_ev": float(fermi_ev_f),
+            "axes": {},
+        }
+
+        for axis in spec.axes:
+            axis_dir = model_root / axis
+            axis_dir.mkdir(parents=True, exist_ok=True)
+            click.echo(
+                click.style(
+                    f"[benchmark] model={model.key} axis={axis}: canonicalizing HR/WIN",
+                    fg="cyan",
+                )
+            )
+            canonical = prepare_canonicalized_inputs(
+                hr_dat_path=hr_dat,
+                win_path=win_path,
+                axis=axis,
+                out_dir=axis_dir / "canonical",
+                seedname=f"{spec.material}_{model.key}_{axis}",
+            )
+            hd = read_hr_dat(canonical.hr_dat_path)
+            max_thickness = max(int(v) for v in spec.thicknesses_uc)
+            p_eff = effective_principal_layer_width(
+                hd,
+                lead_axis="x",
+                n_layers_x=max(2, int(max_thickness)),
+                n_layers_y=int(spec.fixed_width_uc),
+                n_layers_z=int(max_thickness),
+                mode="full_finite",
+                periodic_axis=None,
+            )
+            length_uc = compute_length_uc(p_eff, spec=spec)
+            click.echo(
+                click.style(
+                    f"[benchmark] model={model.key} axis={axis}: p_eff={p_eff}, length_uc={length_uc}, width_uc={spec.fixed_width_uc}, queue={queue}",
+                    fg="cyan",
+                )
+            )
+
+            kwant_benchmark_dir = axis_dir / "kwant"
+            kwant_reference_path = kwant_benchmark_dir / "kwant_reference.json"
+            if kwant_reference_path.exists():
+                kwant_result = json.loads(kwant_reference_path.read_text())
+                kwant_job = {"status": "reused", "path": str(kwant_reference_path)}
+                click.echo(
+                    click.style(
+                        f"[benchmark] model={model.key} axis={axis}: reusing Kwant reference {kwant_reference_path}",
+                        fg="cyan",
+                    )
+                )
+            else:
+                kwant_result, kwant_job = submit_kwant_nanowire_reference(
+                    canonical_input=canonical,
+                    benchmark_dir=kwant_benchmark_dir,
+                    spec=spec,
+                    model_key=model.key,
+                    model_label=model.label,
+                    fermi_ev=fermi_ev_f,
+                    length_uc=length_uc,
+                    queue_override=queue,
+                    walltime=walltime,
+                    python_executable=source_python,
+                    live_log=live_log,
+                    poll_interval=log_poll_interval,
+                    stale_log_seconds=stale_log_seconds,
+                )
+
+            kwant_validation = (
+                kwant_result.get("validation", {})
+                if isinstance(kwant_result.get("validation"), dict)
+                else {}
+            )
+            raw_records = list(kwant_result.get("results", []))
+            kwant_fit = build_article_fit_summary(
+                raw_records,
+                energies_ev=spec.energies_ev,
+                thicknesses_uc=spec.thicknesses_uc,
+                trim_exclude_thicknesses_uc=spec.trim_exclude_thicknesses_uc,
+            )
+            (axis_dir / "kwant_reference_raw.csv").write_text(
+                "\n".join(rows_to_csv_lines(raw_records)) + "\n",
+                encoding="utf-8",
+            )
+            (axis_dir / "kwant_reference_raw.json").write_text(
+                json.dumps({"records": raw_records, "job": kwant_job, "validation": kwant_validation}, indent=2)
+            )
+            (axis_dir / "kwant_reference_fit.csv").write_text(
+                "\n".join(fit_rows_to_csv_lines(kwant_fit)) + "\n",
+                encoding="utf-8",
+            )
+            (axis_dir / "kwant_reference_fit.json").write_text(json.dumps(kwant_fit, indent=2))
+
+            axis_summary: dict[str, Any] = {
+                "status": "ok",
+                "length_uc": int(length_uc),
+                "fixed_width_uc": int(spec.fixed_width_uc),
+                "principal_layer_width": int(p_eff),
+                "kwant_job": kwant_job,
+                "kwant_validation": kwant_validation,
+                "kwant_fit_status": str(kwant_fit.get("status", "")),
+            }
+
+            if str(kwant_validation.get("status", "")).strip().lower() not in {"ok", "skipped"}:
+                axis_summary["status"] = "failed"
+                axis_summary["reason"] = "kwant_reference_validation_failed"
+                failed_targets.append(f"{model.key}:{axis}:kwant_validation")
+                model_summary["axes"][axis] = axis_summary
+                continue
+            if str(kwant_fit.get("status", "")).strip().lower() != "ok":
+                axis_summary["status"] = "failed"
+                axis_summary["reason"] = "kwant_fit_failed"
+                axis_summary["kwant_fit"] = kwant_fit
+                failed_targets.append(f"{model.key}:{axis}:kwant_fit")
+                model_summary["axes"][axis] = axis_summary
+                continue
+
+            if model.primary_for_rgf:
+                rgf_rows: list[dict[str, Any]] = []
+                rgf_jobs: list[dict[str, Any]] = []
+                for thickness_uc in spec.thicknesses_uc:
+                    for delta_e in spec.energies_ev:
+                        tag = (
+                            f"d{int(thickness_uc):02d}_e"
+                            f"{str(delta_e).replace('-', 'm').replace('.', 'p').replace('+', 'p')}"
+                        )
+                        rgf_cfg = dict(source_cfg)
+                        rgf_cfg["name"] = f"nanowire_rgf_{model.key}_{axis}_{tag}"
+                        rgf_cfg["run_dir"] = str((axis_dir / "rgf" / tag).resolve())
+                        rgf_cfg["hr_dat_path"] = canonical.hr_dat_path
+                        rgf_cfg["transport_backend"] = "qsub"
+                        rgf_cfg["transport_engine"] = "rgf"
+                        rgf_cfg["transport_rgf_mode"] = "full_finite"
+                        rgf_cfg["transport_rgf_full_finite_sigma_backend"] = "native"
+                        rgf_cfg["transport_rgf_full_finite_kwant_script"] = ""
+                        rgf_cfg["thicknesses"] = [int(thickness_uc)]
+                        rgf_cfg["disorder_strengths"] = [0.0]
+                        rgf_cfg["n_ensemble"] = 1
+                        rgf_cfg["mfp_lengths"] = []
+                        rgf_cfg["fermi_shift_eV"] = float(fermi_ev_f + float(delta_e))
+                        rgf_cfg["transport_axis"] = "x"
+                        rgf_cfg["thickness_axis"] = "z"
+                        rgf_cfg["transport_n_layers_x"] = int(length_uc)
+                        rgf_cfg["transport_n_layers_y"] = int(spec.fixed_width_uc)
+                        rgf_cfg["reuse_transport_results"] = False
+                        rgf_cfg["transport_strict_qsub"] = True
+                        rgf_cfg["_runtime_live_log"] = bool(live_log)
+                        rgf_cfg["_runtime_log_poll_interval"] = int(log_poll_interval)
+                        rgf_cfg["_runtime_stale_log_seconds"] = int(stale_log_seconds)
+                        rgf_wf = TopoSlabWorkflow.from_config(rgf_cfg)
+                        rgf_result, rgf_job = rgf_wf._stage_transport_rgf_qsub(
+                            Path(canonical.hr_dat_path),
+                            label="primary",
+                        )
+                        rgf_jobs.append(rgf_job)
+                        rgf_rows.append(
+                            {
+                                "thickness_uc": int(thickness_uc),
+                                "energy_rel_fermi_ev": float(delta_e),
+                                "energy_abs_ev": float(fermi_ev_f + float(delta_e)),
+                                "transmission_e2_over_h": _extract_single_transmission_from_rgf(rgf_result),
+                            }
+                        )
+
+                rgf_fit = build_article_fit_summary(
+                    rgf_rows,
+                    energies_ev=spec.energies_ev,
+                    thicknesses_uc=spec.thicknesses_uc,
+                    trim_exclude_thicknesses_uc=spec.trim_exclude_thicknesses_uc,
+                )
+                raw_comparison = compare_reference_and_rgf(
+                    raw_records,
+                    rgf_rows,
+                    abs_tol=spec.abs_tol,
+                    rel_tol=spec.rel_tol,
+                    zero_tol=spec.zero_tol,
+                )
+                fit_comparison = compare_fit_summaries(
+                    kwant_fit,
+                    rgf_fit,
+                    abs_tol=spec.abs_tol,
+                    rel_tol=spec.rel_tol,
+                    zero_tol=spec.zero_tol,
+                    r2_abs_tol=spec.fit_r2_abs_tol,
+                )
+                (axis_dir / "rgf_raw.csv").write_text(
+                    "\n".join(rows_to_csv_lines(rgf_rows)) + "\n",
+                    encoding="utf-8",
+                )
+                (axis_dir / "rgf_raw.json").write_text(
+                    json.dumps({"records": rgf_rows, "jobs": rgf_jobs}, indent=2)
+                )
+                (axis_dir / "rgf_fit.csv").write_text(
+                    "\n".join(fit_rows_to_csv_lines(rgf_fit)) + "\n",
+                    encoding="utf-8",
+                )
+                (axis_dir / "rgf_fit.json").write_text(json.dumps(rgf_fit, indent=2))
+                (axis_dir / "comparison_raw.json").write_text(
+                    json.dumps(
+                        {
+                            "status": raw_comparison.status,
+                            "checked_points": raw_comparison.checked_points,
+                            "max_abs_err": raw_comparison.max_abs_err,
+                            "max_rel_err": raw_comparison.max_rel_err,
+                            "failures": raw_comparison.failures,
+                        },
+                        indent=2,
+                    )
+                )
+                (axis_dir / "comparison_fit.json").write_text(
+                    json.dumps(
+                        {
+                            "status": fit_comparison.status,
+                            "checked_rows": fit_comparison.checked_rows,
+                            "max_abs_err": fit_comparison.max_abs_err,
+                            "max_rel_err": fit_comparison.max_rel_err,
+                            "max_r2_abs_err": fit_comparison.max_r2_abs_err,
+                            "failures": fit_comparison.failures,
+                        },
+                        indent=2,
+                    )
+                )
+                axis_summary["rgf_jobs"] = rgf_jobs
+                axis_summary["raw_comparison"] = {
+                    "status": raw_comparison.status,
+                    "checked_points": raw_comparison.checked_points,
+                    "max_abs_err": raw_comparison.max_abs_err,
+                    "max_rel_err": raw_comparison.max_rel_err,
+                    "failures": raw_comparison.failures,
+                }
+                axis_summary["fit_comparison"] = {
+                    "status": fit_comparison.status,
+                    "checked_rows": fit_comparison.checked_rows,
+                    "max_abs_err": fit_comparison.max_abs_err,
+                    "max_rel_err": fit_comparison.max_rel_err,
+                    "max_r2_abs_err": fit_comparison.max_r2_abs_err,
+                    "failures": fit_comparison.failures,
+                }
+                if raw_comparison.status != "ok" or fit_comparison.status != "ok":
+                    axis_summary["status"] = "failed"
+                    axis_summary["reason"] = "rgf_validation_failed"
+                    failed_targets.append(f"{model.key}:{axis}:rgf")
+
+            model_summary["axes"][axis] = axis_summary
+
+        summary["models"][model.key] = model_summary
+
+    summary["status"] = "ok" if not failed_targets else "failed"
+    summary["failed_targets"] = failed_targets
+    summary_path = benchmark_root / "benchmark_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+    click.echo(click.style(f"[benchmark] summary: {summary_path}", fg="green"))
+    if failed_targets:
+        raise click.ClickException(
+            "Transport benchmark failed for target(s): "
+            + ", ".join(failed_targets)
+            + f". See {summary_path}"
+        )
 
 
 @main.command("benchmark-force-stress")
@@ -7128,7 +9307,7 @@ def smoke(
     }
 
     ts = time.strftime("%Y%m%d_%H%M%S")
-    local_root = Path.home() / ".wtec" / "runs" / "smoke" / ts
+    local_root = _wtec_state_dir() / "runs" / "smoke" / ts
     local_root.mkdir(parents=True, exist_ok=True)
 
     with open_ssh(cluster_cfg) as ssh:
