@@ -1398,7 +1398,15 @@ static void wtec_apply_anderson_disorder(
   }
 }
 
-static int wtec_surface_green_sancho(const double complex *h0, const double complex *v, int n, double complex z, double complex *g_out) {
+static int wtec_surface_green_sancho(
+    const double complex *h0,
+    const double complex *v,
+    int n,
+    double complex z,
+    double complex *g_out,
+    wtec_progress_t *progress,
+    const wtec_point_context_t *ctx,
+    const char *phase) {
   int iter;
   double complex *alpha = wtec_mat_alloc(n, n);
   double complex *beta = wtec_mat_alloc(n, n);
@@ -1410,10 +1418,12 @@ static int wtec_surface_green_sancho(const double complex *h0, const double comp
   double complex *term2 = wtec_mat_alloc(n, n);
   double complex *next_a = wtec_mat_alloc(n, n);
   double complex *next_b = wtec_mat_alloc(n, n);
+  int converged = 0;
   memcpy(alpha, v, (size_t)n * (size_t)n * sizeof(double complex));
   wtec_mat_conj_transpose(v, n, n, beta);
   memcpy(eps, h0, (size_t)n * (size_t)n * sizeof(double complex));
   memcpy(eps_s, h0, (size_t)n * (size_t)n * sizeof(double complex));
+  wtec_progress_step(progress, ctx, phase, 0, WTEC_RGF_SANCHO_MAX_ITER);
   for (iter = 0; iter < WTEC_RGF_SANCHO_MAX_ITER; ++iter) {
     wtec_build_resolvent(eps, n, z, m);
     if (wtec_mat_inverse(m, n, ginv) != 0) {
@@ -1432,13 +1442,21 @@ static int wtec_surface_green_sancho(const double complex *h0, const double comp
     wtec_mat_mul(term2, n, n, beta, n, next_b);
     memcpy(alpha, next_a, (size_t)n * (size_t)n * sizeof(double complex));
     memcpy(beta, next_b, (size_t)n * (size_t)n * sizeof(double complex));
+    if ((iter == 0) || (((iter + 1) % 4) == 0)) {
+      wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
+    }
     if (wtec_mat_norm_fro(alpha, n * n) + wtec_mat_norm_fro(beta, n * n) < WTEC_RGF_SANCHO_TOL) {
+      converged = 1;
+      wtec_progress_step(progress, ctx, phase, iter + 1, WTEC_RGF_SANCHO_MAX_ITER);
       break;
     }
   }
   wtec_build_resolvent(eps_s, n, z, m);
   if (wtec_mat_inverse(m, n, g_out) != 0) {
     goto fail;
+  }
+  if (!converged) {
+    wtec_progress_step(progress, ctx, phase, WTEC_RGF_SANCHO_MAX_ITER, WTEC_RGF_SANCHO_MAX_ITER);
   }
   free(alpha); free(beta); free(eps); free(eps_s); free(m); free(ginv);
   free(term1); free(term2); free(next_a); free(next_b);
@@ -1848,10 +1866,26 @@ static int wtec_compute_transmission_periodic_y(
     wtec_build_block(&ky, p_eff, p_eff, p_eff, nz, v_lead);
     wtec_progress_step(progress, ctx, "periodic_y_build_leads", -1, -1);
     wtec_mat_conj_transpose(v_lead, d_lead, d_lead, v_lead_r);
-    if (wtec_surface_green_sancho(h_lead, v_lead, d_lead, z, g_surf) != 0) {
+    if (wtec_surface_green_sancho(
+            h_lead,
+            v_lead,
+            d_lead,
+            z,
+            g_surf,
+            progress,
+            ctx,
+            "periodic_y_surface_green_left") != 0) {
       goto numeric_cleanup;
     }
-    if (wtec_surface_green_sancho(h_lead, v_lead_r, d_lead, z, g_surf_r) != 0) {
+    if (wtec_surface_green_sancho(
+            h_lead,
+            v_lead_r,
+            d_lead,
+            z,
+            g_surf_r,
+            progress,
+            ctx,
+            "periodic_y_surface_green_right") != 0) {
       goto numeric_cleanup;
     }
     wtec_progress_step(progress, ctx, "periodic_y_surface_green", -1, -1);
@@ -2154,11 +2188,27 @@ static int wtec_compute_transmission_full_finite(
       wtec_build_block_full(model, p_eff, p_eff, p_eff, ny, nz, v_lead);
       wtec_progress_step(progress, ctx, "full_finite_build_leads", -1, -1);
       wtec_mat_conj_transpose(v_lead, d_lead, d_lead, v_lead_r);
-      if (wtec_surface_green_sancho(h_lead, v_lead, d_lead, z, g_surf) != 0) {
+      if (wtec_surface_green_sancho(
+              h_lead,
+              v_lead,
+              d_lead,
+              z,
+              g_surf,
+              progress,
+              ctx,
+              "full_finite_surface_green_left") != 0) {
         fail_stage = "sigma_left_surface_green";
         goto numeric_cleanup;
       }
-      if (wtec_surface_green_sancho(h_lead, v_lead_r, d_lead, z, g_surf_r) != 0) {
+      if (wtec_surface_green_sancho(
+              h_lead,
+              v_lead_r,
+              d_lead,
+              z,
+              g_surf_r,
+              progress,
+              ctx,
+              "full_finite_surface_green_right") != 0) {
         fail_stage = "sigma_right_surface_green";
         goto numeric_cleanup;
       }

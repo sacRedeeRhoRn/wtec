@@ -1407,6 +1407,13 @@ class TopoSlabWorkflow:
             self.cfg.get("transport_rgf_periodic_axis", "y"),
             field_name="transport_rgf_periodic_axis",
         )
+        build_probe = rgf_cluster.get("probe", {}) if isinstance(rgf_cluster, dict) else {}
+        build_blas_backend = str(
+            build_probe.get("blas_backend")
+            or build_probe.get("build_blas_backend")
+            or ""
+        ).strip().lower()
+        threaded_single_point_backend = build_blas_backend not in {"none", "serial"}
         mfp_n_layers_z = int(self.cfg.get("mfp_n_layers_z", 10))
         n_layers_x = int(self.cfg.get("transport_n_layers_x", 4))
         n_layers_y = int(self.cfg.get("transport_n_layers_y", 4))
@@ -1541,6 +1548,7 @@ class TopoSlabWorkflow:
                 requested_mpi_np=int(self.cfg.get("transport_mpi_np", 0)),
                 requested_threads_per_rank=rgf_threads_per_rank,
                 parallel_policy=rgf_parallel_policy,
+                threaded_single_point_backend=threaded_single_point_backend,
             )
             mpi_np = int(execution_plan.mpi_np)
             mpi_ppn = max(1, min(cores_per_node, (mpi_np + n_nodes - 1) // max(1, n_nodes)))
@@ -1549,6 +1557,7 @@ class TopoSlabWorkflow:
             payload["expected_mpi_np"] = mpi_np
             payload["expected_omp_threads"] = int(omp_threads)
             payload["parallel_policy_resolved"] = str(execution_plan.parallel_policy)
+            payload["threaded_single_point_backend"] = bool(threaded_single_point_backend)
             payload["task_shape"] = _jsonable(rgf_summary.task_shape)
             payload_path.write_text(json.dumps(payload, indent=2))
 
@@ -1570,7 +1579,7 @@ class TopoSlabWorkflow:
             cmd = self._thread_exports(
                 cmd,
                 threads=int(omp_threads),
-                full_node_threading=bool(mpi_np == 1),
+                full_node_threading=bool(mpi_np == 1 and int(omp_threads) > 1),
             )
             job_name = f"rgf_{str(label)[:5]}_{run_name}"[:15]
             script = generate_script(
@@ -1616,9 +1625,9 @@ class TopoSlabWorkflow:
 
         raw_payload, runtime_cert = load_rgf_raw_result(raw_result_path)
         runtime_cert = dict(runtime_cert)
-        build_probe = rgf_cluster.get("probe", {}) if isinstance(rgf_cluster, dict) else {}
         runtime_cert["omp_threads"] = int(omp_threads)
         runtime_cert["parallel_policy"] = str(execution_plan.parallel_policy)
+        runtime_cert["threaded_single_point_backend"] = bool(threaded_single_point_backend)
         runtime_cert["blas_backend"] = str(
             build_probe.get("blas_backend")
             or build_probe.get("build_blas_backend")

@@ -74,6 +74,20 @@ def test_plan_execution_prefers_single_rank_threads_for_single_full_finite_point
     assert plan.omp_threads == 64
 
 
+def test_plan_execution_caps_single_point_threads_without_threaded_backend() -> None:
+    plan = plan_execution(
+        mode="full_finite",
+        queue_cores=64,
+        safe_rank_cap=64,
+        n_work_units=1,
+        parallel_policy="auto",
+        threaded_single_point_backend=False,
+    )
+    assert plan.parallel_policy == "single_point"
+    assert plan.mpi_np == 1
+    assert plan.omp_threads == 1
+
+
 def test_work_unit_count_includes_mfp_points_for_transport_planning() -> None:
     assert work_unit_count(
         thicknesses=[4],

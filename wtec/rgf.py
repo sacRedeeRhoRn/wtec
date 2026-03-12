@@ -524,6 +524,7 @@ def plan_execution(
     requested_mpi_np: int = 0,
     requested_threads_per_rank: int | str = 0,
     parallel_policy: str = "auto",
+    threaded_single_point_backend: bool = True,
 ) -> RGFExecutionPlan:
     mode_norm = normalize_rgf_mode(mode)
     policy_norm = normalize_rgf_parallel_policy(parallel_policy)
@@ -559,7 +560,10 @@ def plan_execution(
     else:
         mpi_np = mpi_auto
     max_threads_per_rank = max(1, queue_cores_i // max(1, mpi_np))
-    omp_auto = queue_cores_i if policy_norm == "single_point" else max_threads_per_rank
+    if policy_norm == "single_point":
+        omp_auto = queue_cores_i if bool(threaded_single_point_backend) else 1
+    else:
+        omp_auto = max_threads_per_rank
     omp_threads = (
         min(max_threads_per_rank, requested_threads_i)
         if requested_threads_i > 0
