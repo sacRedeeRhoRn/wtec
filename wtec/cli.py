@@ -8240,8 +8240,13 @@ def _ensure_nanowire_benchmark_rgf_router_ready(*, selected_models: tuple[Any, .
     rgf_root = state.get("rgf")
     rgf_cluster = rgf_root.get("cluster") if isinstance(rgf_root, dict) else None
     if isinstance(rgf_cluster, dict):
+        binary_id = str(rgf_cluster.get("binary_id") or "").strip()
         numerical_status = str(rgf_cluster.get("numerical_status") or "scaffold_only").strip().lower()
-        if bool(rgf_cluster.get("ready")) and numerical_status in {"phase1_ready", "phase2_experimental", "phase2_ready"}:
+        if (
+            bool(rgf_cluster.get("ready"))
+            and binary_id == RGF_BINARY_ID
+            and numerical_status in {"phase1_ready", "phase2_experimental", "phase2_ready"}
+        ):
             return rgf_cluster
 
     click.echo(click.style("[benchmark] native RGF router: preparing cluster scaffold", fg="cyan"))

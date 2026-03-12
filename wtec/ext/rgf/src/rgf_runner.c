@@ -1102,30 +1102,6 @@ static int wtec_p_eff_for_model_full(const wtec_hr_model_t *model, int ny, int n
   return max_abs < 1 ? 1 : max_abs;
 }
 
-static void wtec_active_transverse_spans_full(
-    const wtec_hr_model_t *model,
-    int ny,
-    int nz,
-    int *max_ry_out,
-    int *max_rz_out) {
-  int i;
-  int max_ry = 0;
-  int max_rz = 0;
-  for (i = 0; i < model->n_r; ++i) {
-    if (abs(model->ry[i]) > ny - 1 || abs(model->rz[i]) > nz - 1) {
-      continue;
-    }
-    if (abs(model->ry[i]) > max_ry) {
-      max_ry = abs(model->ry[i]);
-    }
-    if (abs(model->rz[i]) > max_rz) {
-      max_rz = abs(model->rz[i]);
-    }
-  }
-  if (max_ry_out != NULL) *max_ry_out = max_ry;
-  if (max_rz_out != NULL) *max_rz_out = max_rz;
-}
-
 static double complex *wtec_mat_alloc(int rows, int cols) {
   return (double complex *)wtec_calloc((size_t)rows * (size_t)cols, sizeof(double complex));
 }
@@ -2256,15 +2232,13 @@ static int wtec_compute_transmission_full_finite(
   int i, n_slices, p_eff;
   int *widths = NULL;
   double complex z = energy + I * eta;
-  int max_ry = 0, max_rz = 0;
   int pad_x = 0;
   int nx_effective;
   p_eff = wtec_p_eff_for_model_full(model, ny, nz);
   if (p_eff <= 0) {
     return -1;
   }
-  wtec_active_transverse_spans_full(model, ny, nz, &max_ry, &max_rz);
-  pad_x = (p_eff > 0 ? (p_eff - 1) : 0) + max_ry + max_rz;
+  pad_x = (p_eff > 0 ? (p_eff - 1) : 0);
   nx_effective = nx + 2 * pad_x;
   if (wtec_plan_boundary_preserving_widths(nx_effective, p_eff, &widths, &n_slices) != 0 || n_slices <= 0) {
     return -1;
@@ -2285,6 +2259,7 @@ static int wtec_compute_transmission_full_finite(
     double complex *sigma_l = wtec_mat_alloc(d_first, d_first);
     double complex *gamma_l = wtec_mat_alloc(d_first, d_first);
     double complex *c_left = NULL;
+    double complex *c_left_raw = NULL;
     double complex *c_left_h = NULL;
     double complex *tmp = NULL;
     double complex *tmp2 = NULL;
@@ -2383,8 +2358,10 @@ static int wtec_compute_transmission_full_finite(
       wtec_progress_step(progress, ctx, "full_finite_surface_green", -1, -1);
 
       c_left = wtec_mat_alloc(d_first, d_lead);
+      c_left_raw = wtec_mat_alloc(d_first, d_lead);
       c_left_h = wtec_mat_alloc(d_lead, d_first);
-      wtec_build_block_full(model, widths[0], p_eff, p_eff, ny, nz, c_left);
+      wtec_build_block_full(model, widths[0], p_eff, p_eff, ny, nz, c_left_raw);
+      wtec_reverse_lead_rows(c_left_raw, d_first, d_lead, p_eff, cross_block, c_left);
       tmp = wtec_mat_alloc(d_first, d_lead);
       wtec_mat_mul(c_left, d_first, d_lead, g_surf, d_lead, tmp);
       wtec_mat_conj_transpose(c_left, d_first, d_lead, c_left_h);
@@ -2558,7 +2535,7 @@ numeric_cleanup:
       }
     }
     free(h_slices); free(v_slices); free(g_left);
-    free(h_lead); free(v_lead); free(v_lead_r); free(g_surf); free(g_surf_r); free(sigma_l); free(gamma_l); free(c_left); free(c_left_h);
+    free(h_lead); free(v_lead); free(v_lead_r); free(g_surf); free(g_surf_r); free(sigma_l); free(gamma_l); free(c_left); free(c_left_raw); free(c_left_h);
     free(tmp); free(tmp2); free(sigma_r); free(gamma_r); free(c_right); free(c_right_perm); free(c_right_h); free(g_nn); free(x);
     free(widths);
     return ok ? 0 : -1;

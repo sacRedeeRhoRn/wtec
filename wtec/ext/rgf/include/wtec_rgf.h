@@ -1,7 +1,7 @@
 #ifndef WTEC_RGF_H
 #define WTEC_RGF_H
 
-#define WTEC_RGF_BINARY_ID "wtec_rgf_runner_phase2_v4"
+#define WTEC_RGF_BINARY_ID "wtec_rgf_runner_phase2_v6"
 
 typedef struct {
   int rank;

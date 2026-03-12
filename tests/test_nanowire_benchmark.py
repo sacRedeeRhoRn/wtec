@@ -26,6 +26,7 @@ from wtec.transport.nanowire_benchmark import (
     select_benchmark_models,
     select_monotonic_thickness_subsequence,
 )
+from wtec.rgf import RGF_BINARY_ID
 from wtec.wannier.model import _parse_lattice_from_win
 from wtec.wannier.parser import HoppingData, read_hr_dat, write_hr_dat
 
@@ -168,7 +169,7 @@ def test_ensure_nanowire_benchmark_rgf_router_ready_reuses_ready_state(monkeypat
         "rgf": {
             "cluster": {
                 "ready": True,
-                "binary_id": "wtec_rgf_runner_phase2_v1",
+                "binary_id": RGF_BINARY_ID,
                 "binary_path": "/remote/wtec_rgf_runner",
                 "numerical_status": "phase2_experimental",
             }
@@ -189,7 +190,7 @@ def test_ensure_nanowire_benchmark_rgf_router_ready_prepares_missing_state(monke
     updates: list[dict] = []
     prepared = {
         "ready": True,
-        "binary_id": "wtec_rgf_runner_phase2_v1",
+        "binary_id": RGF_BINARY_ID,
         "binary_path": "/remote/wtec_rgf_runner",
         "numerical_status": "phase2_experimental",
     }
@@ -200,6 +201,39 @@ def test_ensure_nanowire_benchmark_rgf_router_ready_prepares_missing_state(monke
     assert out is prepared
     assert len(updates) == 1
     assert updates[0]["rgf"]["cluster"]["binary_path"] == "/remote/wtec_rgf_runner"
+
+
+def test_ensure_nanowire_benchmark_rgf_router_ready_rebuilds_stale_binary(monkeypatch) -> None:
+    spec = NanowireBenchmarkSpec()
+    selected_models = select_benchmark_models(spec)
+    prepared = {
+        "ready": True,
+        "binary_id": RGF_BINARY_ID,
+        "binary_path": "/remote/wtec_rgf_runner",
+        "numerical_status": "phase2_experimental",
+    }
+    monkeypatch.setattr(
+        "wtec.cli._load_init_state",
+        lambda: {
+            "rgf": {
+                "cluster": {
+                    "ready": True,
+                    "binary_id": "wtec_rgf_runner_phase2_v4",
+                    "binary_path": "/remote/old_runner",
+                    "numerical_status": "phase2_experimental",
+                }
+            }
+        },
+    )
+    calls: list[bool] = []
+    monkeypatch.setattr(
+        "wtec.cli._prepare_cluster_rgf_router_setup",
+        lambda dry_run: (calls.append(bool(dry_run)), prepared)[1],
+    )
+    monkeypatch.setattr("wtec.cli._update_init_state", lambda patch: None)
+    out = _ensure_nanowire_benchmark_rgf_router_ready(selected_models=selected_models)
+    assert out is prepared
+    assert calls == [False]
 
 
 def test_run_kwant_and_rgf_overlap_runs_rgf_while_kwant_waits() -> None:
