@@ -8734,7 +8734,7 @@ def benchmark_transport(
     from wtec.transport.kwant_nanowire_benchmark import kwant_reference_is_complete
     from wtec.wannier.parser import read_hr_dat
     from wtec.rgf import effective_principal_layer_width
-    from wtec.workflow.orchestrator import TopoSlabWorkflow
+    from wtec.workflow.orchestrator import TopoSlabWorkflow, resolve_transport_rgf_eta
 
     config_path = _resolve_run_config_path(config_file)
     _load_runtime_dotenv(str(config_path))
