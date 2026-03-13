@@ -296,6 +296,53 @@ def test_rgf_native_runner_emits_progress_and_energy_for_full_finite(tmp_path: P
     shutil.which("make") is None or (shutil.which("cc") is None and shutil.which("mpicc") is None),
     reason="native RGF smoke test requires make and a C compiler",
 )
+def test_extract_kwant_sigmas_reports_full_finite_principal_progress(tmp_path: Path) -> None:
+    pytest.importorskip("kwant")
+
+    hd = HoppingData(
+        num_wann=1,
+        r_vectors=np.array([[0, 0, 0], [1, 0, 0], [-1, 0, 0], [2, 0, 0], [-2, 0, 0]], dtype=int),
+        deg=np.array([1, 1, 1, 1, 1], dtype=int),
+        H_R=np.array(
+            [[[0.0 + 0.0j]], [[-1.0 + 0.0j]], [[-1.0 + 0.0j]], [[-0.4 + 0.0j]], [[-0.4 + 0.0j]]],
+            dtype=complex,
+        ),
+    )
+    hr_path = tmp_path / "toy_hr.dat"
+    write_hr_dat(hr_path, hd, header="toy full-finite exact sigma progress")
+
+    progress: list[str] = []
+    extract_kwant_sigmas(
+        hr_path=hr_path,
+        length_uc=6,
+        width_uc=1,
+        thickness_uc=1,
+        energy_ev=0.1,
+        eta_ev=1.0e-6,
+        out_dir=tmp_path / "sigma",
+        layout="full_finite_principal",
+        progress_cb=progress.append,
+    )
+
+    events = [line.split()[1] for line in progress]
+    assert events == [
+        "full_finite_principal_start",
+        "full_finite_principal_geometry_ready",
+        "full_finite_principal_blocks_ready",
+        "selfenergy_left_start",
+        "selfenergy_left_done",
+        "selfenergy_right_start",
+        "selfenergy_right_done",
+        "sigma_outputs_written",
+    ]
+    assert any("lead_dim=2" in line for line in progress)
+    assert any("manifest_path=sigma_manifest.json" in line for line in progress)
+
+
+@pytest.mark.skipif(
+    shutil.which("make") is None or (shutil.which("cc") is None and shutil.which("mpicc") is None),
+    reason="native RGF smoke test requires make and a C compiler",
+)
 def test_rgf_native_runner_matches_principal_layer_exact_sigma_for_full_finite(tmp_path: Path) -> None:
     kwant = pytest.importorskip("kwant")
 

@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -14,6 +15,20 @@ from wtec.transport.kwant_block_extract import (
     _sorted_slice_sites,
 )
 from wtec.wannier.parser import read_hr_dat
+
+
+def _emit_progress(
+    progress_cb: Callable[[str], None] | None,
+    event: str,
+    **fields: Any,
+) -> None:
+    if progress_cb is None:
+        return
+    parts = [f"{key}={value}" for key, value in fields.items()]
+    line = f"[wtec][sigma] {event}"
+    if parts:
+        line += " " + " ".join(parts)
+    progress_cb(line)
 
 
 def _hr_dict(path: str | Path) -> tuple[int, dict[tuple[int, int, int], np.ndarray]]:
@@ -182,6 +197,7 @@ def extract_kwant_sigmas(
     out_dir: Path,
     kwant_script: Path | None = None,
     layout: str = "raw_fsyst",
+    progress_cb: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     import kwant
 
@@ -194,6 +210,16 @@ def extract_kwant_sigmas(
     if layout_norm == "full_finite_principal":
         if kwant_script is not None:
             raise ValueError("full_finite_principal layout does not support --kwant-script.")
+        _emit_progress(
+            progress_cb,
+            "full_finite_principal_start",
+            hr_path=hr_path.name,
+            length_uc=int(length_uc),
+            width_uc=int(width_uc),
+            thickness_uc=int(thickness_uc),
+            energy_ev=float(energy_ev),
+            eta_ev=float(eta_ev),
+        )
         norb, h_r = _hr_dict(hr_path)
         p_eff = _effective_principal_layer_width(
             h_r,
@@ -208,6 +234,17 @@ def extract_kwant_sigmas(
                 "full_finite_principal layout currently requires boundary-preserving widths that start and end "
                 f"with principal_layer_width={int(p_eff)}; got widths={slice_widths}."
             )
+        lead_dim = int(p_eff) * int(width_uc) * int(thickness_uc) * int(norb)
+        _emit_progress(
+            progress_cb,
+            "full_finite_principal_geometry_ready",
+            norb=int(norb),
+            principal_layer_width=int(p_eff),
+            pad_x=int(pad_x),
+            nx_effective=int(nx_effective),
+            lead_dim=int(lead_dim),
+            slice_widths=",".join(str(int(v)) for v in slice_widths),
+        )
 
         h_lead = _build_block_full_from_hr(
             h_r,
@@ -227,19 +264,39 @@ def extract_kwant_sigmas(
             width_uc=int(width_uc),
             thickness_uc=int(thickness_uc),
         )
+        _emit_progress(
+            progress_cb,
+            "full_finite_principal_blocks_ready",
+            h_lead_shape=f"{h_lead.shape[0]}x{h_lead.shape[1]}",
+            v_lead_shape=f"{v_lead.shape[0]}x{v_lead.shape[1]}",
+        )
         v_lead_r = np.asarray(v_lead.conj().T, dtype=np.complex128)
         z = complex(float(energy_ev), float(eta_ev))
         lead_resolvent = np.asarray(
             h_lead - z * np.eye(h_lead.shape[0], dtype=np.complex128),
             dtype=np.complex128,
         )
+        t0 = time.perf_counter()
+        _emit_progress(progress_cb, "selfenergy_left_start", lead_dim=int(h_lead.shape[0]))
         sigma_left = np.asarray(
             kwant.physics.selfenergy(lead_resolvent, v_lead),
             dtype=np.complex128,
         )
+        _emit_progress(
+            progress_cb,
+            "selfenergy_left_done",
+            wall_seconds=f"{time.perf_counter() - t0:.3f}",
+        )
+        t1 = time.perf_counter()
+        _emit_progress(progress_cb, "selfenergy_right_start", lead_dim=int(h_lead.shape[0]))
         sigma_right = np.asarray(
             kwant.physics.selfenergy(lead_resolvent, v_lead_r),
             dtype=np.complex128,
+        )
+        _emit_progress(
+            progress_cb,
+            "selfenergy_right_done",
+            wall_seconds=f"{time.perf_counter() - t1:.3f}",
         )
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,6 +325,13 @@ def extract_kwant_sigmas(
             "sigma_right_shape": list(sigma_right.shape),
         }
         manifest_path.write_text(json.dumps(payload, indent=2))
+        _emit_progress(
+            progress_cb,
+            "sigma_outputs_written",
+            sigma_left_shape=f"{sigma_left.shape[0]}x{sigma_left.shape[1]}",
+            sigma_right_shape=f"{sigma_right.shape[0]}x{sigma_right.shape[1]}",
+            manifest_path=manifest_path.name,
+        )
         return payload
 
     if kwant_script is not None:
@@ -399,6 +463,9 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    def _printer(line: str) -> None:
+        print(line, flush=True)
+
     payload = extract_kwant_sigmas(
         hr_path=Path(args.hr_path).expanduser().resolve(),
         length_uc=int(args.length_uc),
@@ -409,6 +476,7 @@ def main() -> None:
         out_dir=Path(args.out_dir).expanduser().resolve(),
         kwant_script=Path(args.kwant_script).expanduser().resolve() if args.kwant_script else None,
         layout=str(args.layout),
+        progress_cb=_printer,
     )
     print(json.dumps(payload, indent=2))
 
