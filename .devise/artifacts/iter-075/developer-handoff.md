@@ -159,6 +159,11 @@ The first heartbeat wave on the new run is also visible locally:
 [kwant-bench][rank=3] heartbeat thickness_uc=3 energy_abs_ev=13.704600 elapsed_s=20.0
 [kwant-bench][rank=2] heartbeat thickness_uc=3 energy_abs_ev=13.604600 elapsed_s=20.0
 [kwant-bench][rank=0] heartbeat thickness_uc=3 energy_abs_ev=13.404600 elapsed_s=20.0
+[kwant-bench][rank=9] heartbeat thickness_uc=5 energy_abs_ev=13.804600 elapsed_s=20.0
+[kwant-bench][rank=5] heartbeat thickness_uc=5 energy_abs_ev=13.404600 elapsed_s=20.0
+[kwant-bench][rank=7] heartbeat thickness_uc=5 energy_abs_ev=13.604600 elapsed_s=20.0
+[kwant-bench][rank=8] heartbeat thickness_uc=5 energy_abs_ev=13.704600 elapsed_s=20.0
+[kwant-bench][rank=6] heartbeat thickness_uc=5 energy_abs_ev=13.504600 elapsed_s=20.0
 ```
 
 Fresh direct remote process inspection on `n022` confirms the wider worker fan-out is materialized, not merely staged:
@@ -214,6 +219,8 @@ The current live `d05_e0p0` runtime log shows the job is active on the real clus
 [wtec][sigma] full_finite_principal_geometry_ready norb=16 principal_layer_width=6 pad_x=5 nx_effective=34 lead_dim=6240 slice_widths=6,6,6,10,6
 [wtec][sigma] full_finite_principal_blocks_ready h_lead_shape=6240x6240 v_lead_shape=6240x6240
 [wtec][sigma] selfenergy_left_start lead_dim=6240 solver=lopez_sancho
+[wtec][sigma] selfenergy_left_done wall_seconds=171.812 solver=lopez_sancho iterations=22
+[wtec][sigma] selfenergy_right_start lead_dim=6240 solver=lopez_sancho
 ```
 
 ## Still Unresolved
