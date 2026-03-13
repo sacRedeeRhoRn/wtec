@@ -286,6 +286,47 @@ def test_prepare_delta_h_artifact_uses_cfg_fermi_shift_when_reusing_hr(tmp_path,
     assert captured["fermi_pes_ev"] == 12.34
 
 
+def test_stage_transport_rgf_qsub_reuses_cached_result_for_requested_label(
+    tmp_path, monkeypatch
+) -> None:
+    run_dir = tmp_path / "run"
+    result_path = run_dir / "transport" / "primary" / "transport_result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "transport_results": {
+                    "meta": {"transport_engine": "rgf"},
+                    "thickness_scan": {"0.0": {"thicknesses": [1], "values": [12.5]}},
+                },
+                "runtime_cert": {"mode": "full_finite"},
+            }
+        )
+    )
+    cfg = {
+        "name": "demo",
+        "run_dir": str(run_dir),
+        "transport_engine": "rgf",
+        "transport_backend": "qsub",
+        "transport_strict_qsub": True,
+        "reuse_transport_results": True,
+    }
+    wf = TopoSlabWorkflow.from_config(cfg)
+    wf._state = {"stage": "WANNIER90", "outputs": {}}
+
+    monkeypatch.setattr(
+        "wtec.config.cluster.ClusterConfig.from_env",
+        lambda: (_ for _ in ()).throw(AssertionError("cluster config should not be loaded")),
+    )
+
+    results, meta = wf._stage_transport_rgf_qsub(tmp_path / "unused_hr.dat", label="primary")
+
+    assert next(iter(results["thickness_scan"].values()))["values"] == [12.5]
+    assert meta["status"] == "REUSED"
+    assert meta["backend"] == "cached_result"
+    assert meta["result_file"] == str(result_path)
+
+
 class _SSH:
     def __enter__(self):
         return self

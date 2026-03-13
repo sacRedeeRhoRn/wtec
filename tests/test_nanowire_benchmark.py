@@ -14,6 +14,7 @@ from wtec.cli import (
     _build_nanowire_benchmark_source_seed,
     _build_tis_benchmark_source_cfg,
     _ensure_nanowire_benchmark_rgf_router_ready,
+    _load_complete_nanowire_kwant_reference,
     _resolve_nanowire_benchmark_source_structure,
     _run_rgf_benchmark_axis,
     _run_kwant_and_rgf_overlap,
@@ -164,6 +165,58 @@ def test_append_nanowire_benchmark_trace_writes_jsonl(tmp_path: Path) -> None:
     assert rows[0]["tag"] == "d01_e0p0"
     assert rows[0]["ok"] is True
     assert isinstance(rows[0]["ts"], float)
+
+
+def test_load_complete_nanowire_kwant_reference_rejects_partial_checkpoint(tmp_path: Path) -> None:
+    path = tmp_path / "kwant_reference.json"
+    path.write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "task_count_expected": 2,
+                "task_count_completed": 1,
+                "results": [
+                    {
+                        "thickness_uc": 1,
+                        "energy_rel_fermi_ev": -0.2,
+                        "energy_abs_ev": 13.4046,
+                        "transmission_e2_over_h": 34.0,
+                    }
+                ],
+                "validation": {"status": "partial"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    spec = NanowireBenchmarkSpec(thicknesses_uc=(1,), energies_ev=(-0.2, -0.1))
+    assert _load_complete_nanowire_kwant_reference(path, spec=spec) is None
+
+
+def test_load_complete_nanowire_kwant_reference_accepts_complete_checkpoint(tmp_path: Path) -> None:
+    path = tmp_path / "kwant_reference.json"
+    payload = {
+        "status": "ok",
+        "task_count_expected": 2,
+        "task_count_completed": 2,
+        "results": [
+            {
+                "thickness_uc": 1,
+                "energy_rel_fermi_ev": -0.2,
+                "energy_abs_ev": 13.4046,
+                "transmission_e2_over_h": 34.0,
+            },
+            {
+                "thickness_uc": 1,
+                "energy_rel_fermi_ev": -0.1,
+                "energy_abs_ev": 13.5046,
+                "transmission_e2_over_h": 38.0,
+            },
+        ],
+        "validation": {"status": "ok"},
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    spec = NanowireBenchmarkSpec(thicknesses_uc=(1,), energies_ev=(-0.2, -0.1))
+    assert _load_complete_nanowire_kwant_reference(path, spec=spec) == payload
 
 
 def test_ensure_nanowire_benchmark_rgf_router_ready_reuses_ready_state(monkeypatch) -> None:
@@ -347,6 +400,7 @@ def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
     ]
     assert jobs == [{"job_id": "12345"}]
     assert seen_cfgs and seen_cfgs[0]["_transport_rgf_internal_sigma_mode"] == "kwant_exact"
+    assert seen_cfgs[0]["reuse_transport_results"] is True
 
 
 def test_axis_permutation_maps_expected_axes() -> None:

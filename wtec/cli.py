@@ -8320,6 +8320,28 @@ def _append_nanowire_benchmark_trace(trace_path: Path, event: str, **payload: An
         handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
+def _load_complete_nanowire_kwant_reference(
+    result_path: Path,
+    *,
+    spec: Any,
+) -> dict[str, Any] | None:
+    from wtec.transport.kwant_nanowire_benchmark import kwant_reference_is_complete
+
+    if not result_path.exists():
+        return None
+    try:
+        result = json.loads(result_path.read_text())
+    except Exception:
+        return None
+    if not kwant_reference_is_complete(
+        result,
+        thicknesses=[int(v) for v in spec.thicknesses_uc],
+        energies_rel_fermi_ev=[float(v) for v in spec.energies_ev],
+    ):
+        return None
+    return result
+
+
 def _run_rgf_benchmark_axis(
     *,
     source_cfg: dict[str, Any],
@@ -8385,7 +8407,9 @@ def _run_rgf_benchmark_axis(
             rgf_cfg["transport_n_layers_x"] = int(length_uc)
             rgf_cfg["transport_n_layers_y"] = int(spec.fixed_width_uc)
             rgf_cfg["n_nodes"] = int(transport_nodes)
-            rgf_cfg["reuse_transport_results"] = False
+            # Benchmark reruns should resume completed point directories instead
+            # of recomputing earlier energies after a later case fails.
+            rgf_cfg["reuse_transport_results"] = True
             rgf_cfg["transport_strict_qsub"] = True
             rgf_cfg["_runtime_live_log"] = bool(live_log)
             rgf_cfg["_runtime_log_poll_interval"] = int(log_poll_interval)
@@ -8724,8 +8748,11 @@ def benchmark_transport(
             kwant_reference_path = kwant_benchmark_dir / "kwant_reference.json"
             rgf_rows: list[dict[str, Any]] | None = None
             rgf_jobs: list[dict[str, Any]] | None = None
-            if kwant_reference_path.exists():
-                kwant_result = json.loads(kwant_reference_path.read_text())
+            kwant_result = _load_complete_nanowire_kwant_reference(
+                kwant_reference_path,
+                spec=spec,
+            )
+            if kwant_result is not None:
                 kwant_job = {"status": "reused", "path": str(kwant_reference_path)}
                 click.echo(
                     click.style(
@@ -8734,6 +8761,13 @@ def benchmark_transport(
                     )
                 )
             else:
+                if kwant_reference_path.exists():
+                    click.echo(
+                        click.style(
+                            f"[benchmark] model={model.key} axis={axis}: resuming partial Kwant reference {kwant_reference_path}",
+                            fg="cyan",
+                        )
+                    )
                 if model.primary_for_rgf:
                     click.echo(
                         click.style(

@@ -1327,6 +1327,17 @@ class TopoSlabWorkflow:
             load_rgf_raw_result,
         )
 
+        cached = self._load_cached_transport_results(label=label)
+        if cached is not None:
+            result_file = self._transport_result_file(label=label)
+            print(f"[Orchestrator] Reusing cached transport result: {result_file}")
+            return cached, {
+                "status": "REUSED",
+                "backend": "cached_result",
+                "result_file": str(result_file),
+                "label": str(label),
+            }
+
         cfg = ClusterConfig.from_env()
         init_state = _load_init_state()
         rgf_cluster = (
@@ -1917,20 +1928,23 @@ class TopoSlabWorkflow:
         run_name = str(self.cfg.get("name", "run")).strip() or "run"
         return f"{cluster_cfg.remote_workdir.rstrip('/')}/{run_name}"
 
-    def _transport_result_file(self) -> Path:
+    def _transport_result_file(self, *, label: str = "primary") -> Path:
         run_dir = Path(self.cfg.get("run_dir", ".")).resolve()
-        primary = run_dir / "transport" / "primary" / "transport_result.json"
-        legacy = run_dir / "transport" / "transport_result.json"
-        if primary.exists():
-            return primary
-        return legacy
+        labeled = run_dir / "transport" / str(label) / "transport_result.json"
+        if labeled.exists():
+            return labeled
+        if str(label) == "primary":
+            legacy = run_dir / "transport" / "transport_result.json"
+            if legacy.exists():
+                return legacy
+        return labeled
 
-    def _load_cached_transport_results(self) -> dict | None:
+    def _load_cached_transport_results(self, *, label: str = "primary") -> dict | None:
         run_profile = str(self.cfg.get("run_profile", "strict")).strip().lower() or "strict"
         default_reuse = run_profile == "smoke"
         if not bool(self.cfg.get("reuse_transport_results", default_reuse)):
             return None
-        p = self._transport_result_file()
+        p = self._transport_result_file(label=label)
         if not p.exists() or p.stat().st_size == 0:
             return None
         try:

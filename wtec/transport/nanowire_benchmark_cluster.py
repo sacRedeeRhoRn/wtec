@@ -13,6 +13,10 @@ from wtec.cluster.ssh import open_ssh
 from wtec.cluster.submit import JobManager
 from wtec.config.cluster import ClusterConfig
 from wtec.transport.nanowire_benchmark import CanonicalizedNanowireInput, NanowireBenchmarkSpec
+from wtec.transport.kwant_nanowire_benchmark import (
+    kwant_reference_is_complete,
+    kwant_reference_progress,
+)
 from wtec.workflow.orchestrator import TopoSlabWorkflow
 
 
@@ -132,6 +136,11 @@ def submit_kwant_nanowire_reference(
 
     path_tail = "_".join(benchmark_path.parts[-3:])
     remote_dir = f"{cfg.remote_workdir.rstrip('/')}/nanowire_benchmark/{spec.mp_id}/{path_tail}"
+    max_attempts_raw = os.environ.get("TOPOSLAB_KWANT_BENCH_MAX_ATTEMPTS", "").strip()
+    try:
+        max_attempts = max(1, int(max_attempts_raw)) if max_attempts_raw else 8
+    except ValueError:
+        max_attempts = 8
     with open_ssh(cfg) as ssh:
         jm = JobManager(ssh)
         queue_used = jm.resolve_queue(queue_override or cfg.pbs_queue, fallback_order=cfg.pbs_queue_priority)
@@ -179,28 +188,73 @@ def submit_kwant_nanowire_reference(
             [cmd],
         )
         script_path.write_text(script)
-        try:
-            meta = jm.submit_and_wait(
-                script,
-                remote_dir=remote_dir,
-                local_dir=benchmark_path,
-                retrieve_patterns=[result_path.name, "*.out", "wtec_job.log"],
-                script_name=script_path.name,
-                stage_files=[payload_path, worker_zip, Path(canonical_input.hr_dat_path)],
-                expected_local_outputs=[result_path.name],
-                queue_used=queue_used,
-                poll_interval=int(poll_interval),
-                verbose=True,
-                live_log=bool(live_log),
-                live_files=[result_path.name, "wtec_job.log"],
-                stale_log_seconds=int(stale_log_seconds),
-                retrieve_on_failure=True,
-                stream_from_start=True,
-                cancel_event=cancel_event,
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                meta = jm.submit_and_wait(
+                    script,
+                    remote_dir=remote_dir,
+                    local_dir=benchmark_path,
+                    retrieve_patterns=[result_path.name, "*.out", "wtec_job.log"],
+                    script_name=script_path.name,
+                    stage_files=[payload_path, worker_zip, Path(canonical_input.hr_dat_path)],
+                    expected_local_outputs=[result_path.name],
+                    queue_used=queue_used,
+                    poll_interval=int(poll_interval),
+                    verbose=True,
+                    live_log=bool(live_log),
+                    live_files=[result_path.name, "wtec_job.log"],
+                    stale_log_seconds=int(stale_log_seconds),
+                    retrieve_on_failure=True,
+                    stream_from_start=True,
+                    cancel_event=cancel_event,
+                )
+            except RuntimeError as exc:
+                if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
+                    raise CancelledError("Kwant reference job cancelled.") from exc
+                if result_path.exists():
+                    partial = json.loads(result_path.read_text())
+                    if not kwant_reference_is_complete(
+                        partial,
+                        thicknesses=spec.thicknesses_uc,
+                        energies_rel_fermi_ev=spec.energies_ev,
+                    ):
+                        progress = kwant_reference_progress(
+                            partial,
+                            thicknesses=spec.thicknesses_uc,
+                            energies_rel_fermi_ev=spec.energies_ev,
+                        )
+                        if attempt < max_attempts:
+                            print(
+                                "[kwant-bench] "
+                                f"checkpointed {int(progress['completed'])}/{int(progress['expected'])} "
+                                f"points after failed job attempt {attempt}; resubmitting",
+                                flush=True,
+                            )
+                            continue
+                raise
+            result = json.loads(result_path.read_text())
+            if kwant_reference_is_complete(
+                result,
+                thicknesses=spec.thicknesses_uc,
+                energies_rel_fermi_ev=spec.energies_ev,
+            ):
+                return result, meta
+            progress = kwant_reference_progress(
+                result,
+                thicknesses=spec.thicknesses_uc,
+                energies_rel_fermi_ev=spec.energies_ev,
             )
-        except RuntimeError as exc:
-            if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
-                raise CancelledError("Kwant reference job cancelled.") from exc
-            raise
-    result = json.loads(result_path.read_text())
-    return result, meta
+            if attempt >= max_attempts:
+                raise RuntimeError(
+                    "Kwant reference remains incomplete after "
+                    f"{attempt} attempt(s): {int(progress['completed'])}/{int(progress['expected'])} "
+                    f"points in {result_path}."
+                )
+            print(
+                "[kwant-bench] "
+                f"checkpointed {int(progress['completed'])}/{int(progress['expected'])} "
+                f"points after attempt {attempt}; resubmitting remaining sweep",
+                flush=True,
+            )
