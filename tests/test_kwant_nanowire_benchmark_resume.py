@@ -231,12 +231,13 @@ def test_distribute_pending_tasks_keeps_thickness_groups_together() -> None:
             for task in bucket:
                 thickness_uc = int(task[0])
                 previous = thickness_to_bucket.setdefault(thickness_uc, bucket_index)
-                assert previous == bucket_index
+                if size < 16:
+                    assert previous == bucket_index
 
         assert sorted(task for bucket in buckets for task in bucket) == sorted(pending_tasks)
 
 
-def test_distribute_pending_tasks_seeds_first_wave_with_lightest_thicknesses() -> None:
+def test_distribute_pending_tasks_spends_extra_ranks_on_thin_groups() -> None:
     pending_tasks = [
         (thickness_uc, energy_rel_fermi_ev, 13.6046 + float(energy_rel_fermi_ev))
         for thickness_uc in (3, 5, 7, 9, 11, 13)
@@ -245,5 +246,13 @@ def test_distribute_pending_tasks_seeds_first_wave_with_lightest_thicknesses() -
 
     buckets = knb._distribute_pending_tasks(pending_tasks, size=16)
     first_wave = [bucket[0] for bucket in buckets if bucket]
-    assert [int(task[0]) for task in first_wave] == [3, 5, 7, 9, 11, 13]
-    assert all(bucket and len({int(task[0]) for task in bucket}) == 1 for bucket in buckets if bucket)
+    assert [int(task[0]) for task in first_wave] == [3, 3, 3, 3, 3, 5, 5, 5, 5, 5, 7, 7, 7, 9, 11, 13]
+    counts_by_thickness: dict[int, int] = {}
+    for bucket in buckets:
+        if not bucket:
+            continue
+        thicknesses = {int(task[0]) for task in bucket}
+        assert len(thicknesses) == 1
+        thickness_uc = thicknesses.pop()
+        counts_by_thickness[thickness_uc] = counts_by_thickness.get(thickness_uc, 0) + 1
+    assert counts_by_thickness == {3: 5, 5: 5, 7: 3, 9: 1, 11: 1, 13: 1}

@@ -292,12 +292,27 @@ def _distribute_pending_tasks(
             )
         )
 
-    # When enough ranks are available, keep every thickness on its own rank so
-    # the expensive Kwant finalized system is built once per thickness and then
-    # reused across all requested energies on that rank.
+    # When enough ranks are available, keep every thickness grouped, but spend
+    # additional ranks only on the cheapest thicknesses first. That preserves
+    # the big memory win from thickness-local reuse while recovering useful
+    # task-level parallelism from the widened MPI layout.
     if world_size >= len(grouped_tasks):
         ordered_groups = sorted(grouped_tasks, key=lambda item: (item[0], item[1]))
-        return [list(tasks) for _, _, tasks in ordered_groups] + [[] for _ in range(world_size - len(ordered_groups))]
+        allocations: list[tuple[int, int, list[tuple[int, float, float]], int]] = []
+        extra_ranks = world_size - len(ordered_groups)
+        for group_load, thickness_uc, tasks in ordered_groups:
+            additional = min(max(0, len(tasks) - 1), max(0, extra_ranks))
+            rank_count = 1 + additional
+            extra_ranks -= additional
+            allocations.append((group_load, thickness_uc, tasks, rank_count))
+
+        buckets: list[list[tuple[int, float, float]]] = []
+        for _, _, tasks, rank_count in allocations:
+            for offset in range(rank_count):
+                buckets.append(list(tasks[offset::rank_count]))
+        if len(buckets) < world_size:
+            buckets.extend([[] for _ in range(world_size - len(buckets))])
+        return buckets
 
     buckets: list[list[tuple[int, int, int, tuple[int, float, float]]]] = [[] for _ in range(world_size)]
     loads = [0 for _ in range(world_size)]
