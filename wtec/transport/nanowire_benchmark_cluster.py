@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import CancelledError
+import hashlib
 import json
 import math
 import os
@@ -58,6 +59,14 @@ def _format_walltime_seconds(total_seconds: int) -> str:
     hours, rem = divmod(seconds, 3600)
     minutes, secs = divmod(rem, 60)
     return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _kwant_remote_dir(*, remote_workdir: str, mp_id: str, benchmark_path: Path) -> str:
+    resolved = benchmark_path.expanduser().resolve()
+    tail_parts = resolved.parts[-4:] if len(resolved.parts) >= 4 else resolved.parts
+    path_tail = "_".join(part for part in tail_parts if part)
+    digest = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:10]
+    return f"{remote_workdir.rstrip('/')}/nanowire_benchmark/{mp_id}/{path_tail}_{digest}"
 
 
 def _resolve_kwant_reference_walltime(
@@ -145,8 +154,11 @@ def submit_kwant_nanowire_reference(
     if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
         raise CancelledError("Kwant reference launch cancelled before submission.")
 
-    path_tail = "_".join(benchmark_path.parts[-3:])
-    remote_dir = f"{cfg.remote_workdir.rstrip('/')}/nanowire_benchmark/{spec.mp_id}/{path_tail}"
+    remote_dir = _kwant_remote_dir(
+        remote_workdir=cfg.remote_workdir,
+        mp_id=str(spec.mp_id),
+        benchmark_path=benchmark_path,
+    )
     max_attempts_raw = os.environ.get("TOPOSLAB_KWANT_BENCH_MAX_ATTEMPTS", "").strip()
     try:
         max_attempts = max(1, int(max_attempts_raw)) if max_attempts_raw else 8
@@ -204,6 +216,11 @@ def submit_kwant_nanowire_reference(
         )
         script_path.write_text(script)
         attempt = 0
+        stage_files = [payload_path, worker_zip, Path(canonical_input.hr_dat_path)]
+        if result_path.exists():
+            stage_files.append(result_path)
+        stage_files.extend(sorted(benchmark_path.glob(f"{result_path.stem}.rank*.jsonl")))
+
         while True:
             attempt += 1
             try:
@@ -218,7 +235,7 @@ def submit_kwant_nanowire_reference(
                         "wtec_job.log",
                     ],
                     script_name=script_path.name,
-                    stage_files=[payload_path, worker_zip, Path(canonical_input.hr_dat_path)],
+                    stage_files=stage_files,
                     expected_local_outputs=[result_path.name],
                     queue_used=queue_used,
                     poll_interval=int(poll_interval),

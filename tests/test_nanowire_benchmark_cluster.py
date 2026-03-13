@@ -131,6 +131,25 @@ def test_submit_kwant_nanowire_reference_uses_conservative_multi_rank_layout(
     assert meta["status"] == "ok"
 
 
+def test_kwant_remote_dir_includes_local_root_identity(tmp_path: Path) -> None:
+    bench_a = tmp_path / "iter_a" / "model_b" / "c" / "kwant"
+    bench_b = tmp_path / "iter_b" / "model_b" / "c" / "kwant"
+    remote_a = nbcluster._kwant_remote_dir(
+        remote_workdir="/remote/work",
+        mp_id="mp-1018028",
+        benchmark_path=bench_a,
+    )
+    remote_b = nbcluster._kwant_remote_dir(
+        remote_workdir="/remote/work",
+        mp_id="mp-1018028",
+        benchmark_path=bench_b,
+    )
+
+    assert remote_a != remote_b
+    assert "iter_a_model_b_c_kwant_" in remote_a
+    assert "iter_b_model_b_c_kwant_" in remote_b
+
+
 def test_submit_kwant_nanowire_reference_forwards_heartbeat_env_override(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -193,6 +212,104 @@ def test_submit_kwant_nanowire_reference_forwards_heartbeat_env_override(
 
     script = str(seen["script"])
     assert "export TOPOSLAB_KWANT_BENCH_HEARTBEAT_SECONDS=20" in script
+    assert result["validation"]["status"] == "ok"
+    assert meta["status"] == "ok"
+
+
+def test_submit_kwant_nanowire_reference_stages_local_partial_checkpoint_and_shards(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = NanowireBenchmarkSpec(energies_ev=(-0.2, 0.0), thicknesses_uc=(1,))
+    fermi_ev = 1.23
+    benchmark_dir = tmp_path / "iter_resume" / "model_b" / "c" / "kwant"
+    benchmark_dir.mkdir(parents=True)
+    hr_path = benchmark_dir / "toy_hr.dat"
+    hr_path.write_text("dummy")
+    worker_zip = benchmark_dir / "wtec_src.zip"
+    worker_zip.write_text("zip")
+    checkpoint_path = benchmark_dir / "kwant_reference.json"
+    checkpoint_path.write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "task_count_expected": 2,
+                "task_count_completed": 1,
+                "results": [
+                    {
+                        "thickness_uc": 1,
+                        "energy_rel_fermi_ev": -0.2,
+                        "energy_abs_ev": 1.03,
+                        "transmission_e2_over_h": 11.0,
+                    }
+                ],
+                "validation": {"status": "partial"},
+            }
+        )
+    )
+    shard_path = benchmark_dir / "kwant_reference.rank0.jsonl"
+    shard_path.write_text(
+        json.dumps(
+            {
+                "thickness_uc": 1,
+                "energy_rel_fermi_ev": -0.2,
+                "energy_abs_ev": 1.03,
+                "transmission_e2_over_h": 11.0,
+            }
+        )
+        + "\n"
+    )
+
+    seen: dict[str, object] = {}
+
+    class _FakeJobManager:
+        def __init__(self, ssh: object) -> None:
+            seen["ssh"] = ssh
+
+        def resolve_queue(self, queue: str, fallback_order: list[str] | None = None) -> str:
+            return queue
+
+        def submit_and_wait(self, script: str, **kwargs):
+            seen["remote_dir"] = kwargs.get("remote_dir")
+            seen["stage_files"] = kwargs.get("stage_files")
+            checkpoint_path.write_text(
+                json.dumps(_complete_kwant_reference_payload(spec=spec, fermi_ev=fermi_ev))
+            )
+            return {"status": "ok"}
+
+    monkeypatch.setattr(nbcluster, "open_ssh", lambda cfg: _DummySSH())
+    monkeypatch.setattr(nbcluster, "JobManager", _FakeJobManager)
+    monkeypatch.setattr(nbcluster.ClusterConfig, "from_env", staticmethod(lambda: _FakeClusterConfig()))
+    monkeypatch.setattr(
+        nbcluster.TopoSlabWorkflow,
+        "_worker_source_zip",
+        staticmethod(lambda _: worker_zip),
+    )
+
+    canonical = CanonicalizedNanowireInput(
+        axis="c",
+        hr_dat_path=str(hr_path),
+        win_path=str(benchmark_dir / "toy.win"),
+        permutation=(2, 0, 1),
+        lattice_vectors=[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    )
+
+    result, meta = nbcluster.submit_kwant_nanowire_reference(
+        canonical_input=canonical,
+        benchmark_dir=benchmark_dir,
+        spec=spec,
+        model_key="model_b",
+        model_label="Model B",
+        fermi_ev=fermi_ev,
+        length_uc=24,
+        queue_override="g4",
+        python_executable="python3",
+        live_log=False,
+    )
+
+    staged = [Path(p) for p in seen["stage_files"]]
+    assert checkpoint_path in staged
+    assert shard_path in staged
+    assert "iter_resume_model_b_c_kwant_" in str(seen["remote_dir"])
     assert result["validation"]["status"] == "ok"
     assert meta["status"] == "ok"
 
