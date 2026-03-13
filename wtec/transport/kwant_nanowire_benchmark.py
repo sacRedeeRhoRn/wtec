@@ -254,26 +254,11 @@ def _distribute_pending_tasks(
     world_size = max(1, int(size))
     if world_size == 1:
         return [list(pending_tasks)]
-    buckets: list[list[tuple[int, tuple[int, float, float]]]] = [[] for _ in range(world_size)]
+    buckets: list[list[tuple[int, int, tuple[int, float, float]]]] = [[] for _ in range(world_size)]
     if not pending_tasks:
         return [[] for _ in range(world_size)]
 
-    loads = [0 for _ in range(world_size)]
-    ranked = sorted(
-        enumerate(pending_tasks),
-        key=lambda item: (
-            -_task_cost_estimate(item[1]),
-            abs(float(item[1][1])),
-            float(item[1][1]),
-            item[0],
-        ),
-    )
-    for index, task in ranked:
-        rank = min(range(world_size), key=lambda rid: (loads[rid], len(buckets[rid]), rid))
-        buckets[rank].append((index, task))
-        loads[rank] += _task_cost_estimate(task)
-
-    def _local_order(item: tuple[int, tuple[int, float, float]]) -> tuple[int, float, float, int]:
+    def _rank_key(item: tuple[int, tuple[int, float, float]]) -> tuple[int, float, float, int]:
         index, task = item
         return (
             _task_cost_estimate(task),
@@ -282,7 +267,47 @@ def _distribute_pending_tasks(
             index,
         )
 
-    return [[task for _, task in sorted(bucket, key=_local_order)] for bucket in buckets]
+    ranked = sorted(
+        enumerate(pending_tasks),
+        key=_rank_key,
+    )
+    loads = [0 for _ in range(world_size)]
+
+    # Seed the first wave with the globally lightest tasks so the live run can
+    # yield early completions and partial checkpoints before the thickest
+    # memory-heavy points dominate the node.
+    seed_count = min(world_size, len(ranked))
+    for rank, (index, task) in enumerate(ranked[:seed_count]):
+        buckets[rank].append((0, index, task))
+        loads[rank] += _task_cost_estimate(task)
+
+    remaining = sorted(
+        ranked[seed_count:],
+        key=lambda item: (
+            -_task_cost_estimate(item[1]),
+            abs(float(item[1][1])),
+            float(item[1][1]),
+            item[0],
+        ),
+    )
+    for index, task in remaining:
+        rank = min(range(world_size), key=lambda rid: (loads[rid], len(buckets[rid]), rid))
+        buckets[rank].append((1, index, task))
+        loads[rank] += _task_cost_estimate(task)
+
+    def _local_order(
+        item: tuple[int, int, tuple[int, float, float]],
+    ) -> tuple[int, int, float, float, int]:
+        phase, index, task = item
+        return (
+            phase,
+            _task_cost_estimate(task),
+            abs(float(task[1])),
+            float(task[1]),
+            index,
+        )
+
+    return [[task for _, _, task in sorted(bucket, key=_local_order)] for bucket in buckets]
 
 
 def _expected_task_count(
@@ -648,11 +673,13 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
         if size > 1 and pending_tasks:
             load_estimates = [sum(_task_cost_estimate(task) for task in bucket) for bucket in task_buckets]
             counts = [len(bucket) for bucket in task_buckets]
+            first_wave = [int(bucket[0][0]) for bucket in task_buckets if bucket]
             print(
                 "[kwant-bench] "
                 f"distribution load_min={min(load_estimates)} "
                 f"load_max={max(load_estimates)} "
-                f"counts={counts}",
+                f"counts={counts} "
+                f"first_wave_thicknesses={first_wave}",
                 flush=True,
             )
 

@@ -236,3 +236,27 @@ def test_distribute_pending_tasks_balances_heavy_thicknesses() -> None:
     for bucket in buckets:
         local_costs = [knb._task_cost_estimate(task) for task in bucket]
         assert local_costs == sorted(local_costs)
+
+
+def test_distribute_pending_tasks_seeds_first_wave_with_lightest_tasks() -> None:
+    pending_tasks = [
+        (thickness_uc, energy_rel_fermi_ev, 13.6046 + float(energy_rel_fermi_ev))
+        for thickness_uc in (3, 5, 7, 9, 11, 13)
+        for energy_rel_fermi_ev in (-0.2, -0.1, 0.0, 0.1, 0.2)
+    ]
+
+    buckets = knb._distribute_pending_tasks(pending_tasks, size=16)
+    first_wave = [bucket[0] for bucket in buckets if bucket]
+
+    ranked_light = sorted(
+        pending_tasks,
+        key=lambda task: (
+            knb._task_cost_estimate(task),
+            abs(float(task[1])),
+            float(task[1]),
+            float(task[2]),
+        ),
+    )
+
+    assert sorted(first_wave) == sorted(ranked_light[:16])
+    assert max(knb._task_cost_estimate(task) for task in first_wave) <= knb._task_cost_estimate((9, 0.0, 0.0))
