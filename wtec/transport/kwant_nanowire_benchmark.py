@@ -246,68 +246,77 @@ def _task_cost_estimate(task: tuple[int, float, float]) -> int:
     return int(thickness_uc**3)
 
 
+def _task_order_key(
+    task: tuple[int, float, float],
+    *,
+    index: int = 0,
+) -> tuple[int, float, float, int]:
+    return (
+        _task_cost_estimate(task),
+        abs(float(task[1])),
+        float(task[1]),
+        int(index),
+    )
+
+
 def _distribute_pending_tasks(
     pending_tasks: list[tuple[int, float, float]],
     *,
     size: int,
 ) -> list[list[tuple[int, float, float]]]:
     world_size = max(1, int(size))
-    if world_size == 1:
-        return [list(pending_tasks)]
-    buckets: list[list[tuple[int, int, tuple[int, float, float]]]] = [[] for _ in range(world_size)]
     if not pending_tasks:
         return [[] for _ in range(world_size)]
+    if world_size == 1:
+        return [list(pending_tasks)]
 
-    def _rank_key(item: tuple[int, tuple[int, float, float]]) -> tuple[int, float, float, int]:
-        index, task = item
-        return (
-            _task_cost_estimate(task),
-            abs(float(task[1])),
-            float(task[1]),
-            index,
+    indexed_tasks = list(enumerate(pending_tasks))
+    groups_by_thickness: dict[int, list[tuple[int, tuple[int, float, float]]]] = {}
+    for index, task in indexed_tasks:
+        groups_by_thickness.setdefault(int(task[0]), []).append((index, task))
+
+    grouped_tasks: list[tuple[int, int, list[tuple[int, float, float]]]] = []
+    for thickness_uc, items in sorted(groups_by_thickness.items()):
+        ordered_tasks = [
+            task
+            for _, task in sorted(
+                items,
+                key=lambda item: _task_order_key(item[1], index=item[0]),
+            )
+        ]
+        grouped_tasks.append(
+            (
+                sum(_task_cost_estimate(task) for task in ordered_tasks),
+                int(thickness_uc),
+                ordered_tasks,
+            )
         )
 
-    ranked = sorted(
-        enumerate(pending_tasks),
-        key=_rank_key,
-    )
+    # When enough ranks are available, keep every thickness on its own rank so
+    # the expensive Kwant finalized system is built once per thickness and then
+    # reused across all requested energies on that rank.
+    if world_size >= len(grouped_tasks):
+        ordered_groups = sorted(grouped_tasks, key=lambda item: (item[0], item[1]))
+        return [list(tasks) for _, _, tasks in ordered_groups] + [[] for _ in range(world_size - len(ordered_groups))]
+
+    buckets: list[list[tuple[int, int, int, tuple[int, float, float]]]] = [[] for _ in range(world_size)]
     loads = [0 for _ in range(world_size)]
-
-    # Seed the first wave with the globally lightest tasks so the live run can
-    # yield early completions and partial checkpoints before the thickest
-    # memory-heavy points dominate the node.
-    seed_count = min(world_size, len(ranked))
-    for rank, (index, task) in enumerate(ranked[:seed_count]):
-        buckets[rank].append((0, index, task))
-        loads[rank] += _task_cost_estimate(task)
-
-    remaining = sorted(
-        ranked[seed_count:],
-        key=lambda item: (
-            -_task_cost_estimate(item[1]),
-            abs(float(item[1][1])),
-            float(item[1][1]),
-            item[0],
-        ),
-    )
-    for index, task in remaining:
+    for group_load, thickness_uc, tasks in sorted(grouped_tasks, key=lambda item: (-item[0], item[1])):
         rank = min(range(world_size), key=lambda rid: (loads[rid], len(buckets[rid]), rid))
-        buckets[rank].append((1, index, task))
-        loads[rank] += _task_cost_estimate(task)
+        for local_index, task in enumerate(tasks):
+            buckets[rank].append((group_load, thickness_uc, local_index, task))
+        loads[rank] += group_load
 
-    def _local_order(
-        item: tuple[int, int, tuple[int, float, float]],
-    ) -> tuple[int, int, float, float, int]:
-        phase, index, task = item
-        return (
-            phase,
-            _task_cost_estimate(task),
-            abs(float(task[1])),
-            float(task[1]),
-            index,
-        )
-
-    return [[task for _, _, task in sorted(bucket, key=_local_order)] for bucket in buckets]
+    return [
+        [
+            task
+            for _, _, _, task in sorted(
+                bucket,
+                key=lambda item: (item[0], item[1], item[2]),
+            )
+        ]
+        for bucket in buckets
+    ]
 
 
 def _expected_task_count(

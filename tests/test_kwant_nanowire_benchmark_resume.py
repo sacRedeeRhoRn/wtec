@@ -215,30 +215,28 @@ def test_run_local_tasks_appends_rank_shards_per_completion(tmp_path: Path, monk
     assert [json.loads(line)["energy_rel_fermi_ev"] for line in shard_lines] == [-0.2, 0.0]
 
 
-def test_distribute_pending_tasks_balances_heavy_thicknesses() -> None:
+def test_distribute_pending_tasks_keeps_thickness_groups_together() -> None:
     pending_tasks = [
         (thickness_uc, energy_rel_fermi_ev, 13.6046 + float(energy_rel_fermi_ev))
         for thickness_uc in (3, 5, 7, 9, 11, 13)
         for energy_rel_fermi_ev in (-0.2, -0.1, 0.0, 0.1, 0.2)
     ]
 
-    buckets = knb._distribute_pending_tasks(pending_tasks, size=16)
-    striped = [pending_tasks[rank::16] for rank in range(16)]
+    for size in (3, 16):
+        buckets = knb._distribute_pending_tasks(pending_tasks, size=size)
+        thickness_to_bucket: dict[int, int] = {}
+        for bucket_index, bucket in enumerate(buckets):
+            local_costs = [knb._task_cost_estimate(task) for task in bucket]
+            assert local_costs == sorted(local_costs)
+            for task in bucket:
+                thickness_uc = int(task[0])
+                previous = thickness_to_bucket.setdefault(thickness_uc, bucket_index)
+                assert previous == bucket_index
 
-    def _loads(groups: list[list[tuple[int, float, float]]]) -> list[int]:
-        return [sum(knb._task_cost_estimate(task) for task in group) for group in groups]
-
-    balanced_loads = _loads(buckets)
-    striped_loads = _loads(striped)
-
-    assert sorted(task for bucket in buckets for task in bucket) == sorted(pending_tasks)
-    assert max(balanced_loads) < max(striped_loads)
-    for bucket in buckets:
-        local_costs = [knb._task_cost_estimate(task) for task in bucket]
-        assert local_costs == sorted(local_costs)
+        assert sorted(task for bucket in buckets for task in bucket) == sorted(pending_tasks)
 
 
-def test_distribute_pending_tasks_seeds_first_wave_with_lightest_tasks() -> None:
+def test_distribute_pending_tasks_seeds_first_wave_with_lightest_thicknesses() -> None:
     pending_tasks = [
         (thickness_uc, energy_rel_fermi_ev, 13.6046 + float(energy_rel_fermi_ev))
         for thickness_uc in (3, 5, 7, 9, 11, 13)
@@ -247,16 +245,5 @@ def test_distribute_pending_tasks_seeds_first_wave_with_lightest_tasks() -> None
 
     buckets = knb._distribute_pending_tasks(pending_tasks, size=16)
     first_wave = [bucket[0] for bucket in buckets if bucket]
-
-    ranked_light = sorted(
-        pending_tasks,
-        key=lambda task: (
-            knb._task_cost_estimate(task),
-            abs(float(task[1])),
-            float(task[1]),
-            float(task[2]),
-        ),
-    )
-
-    assert sorted(first_wave) == sorted(ranked_light[:16])
-    assert max(knb._task_cost_estimate(task) for task in first_wave) <= knb._task_cost_estimate((9, 0.0, 0.0))
+    assert [int(task[0]) for task in first_wave] == [3, 5, 7, 9, 11, 13]
+    assert all(bucket and len({int(task[0]) for task in bucket}) == 1 for bucket in buckets if bucket)
