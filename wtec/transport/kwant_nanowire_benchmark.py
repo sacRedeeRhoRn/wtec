@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 from contextlib import suppress
 import json
+import multiprocessing as mp
 import os
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -145,6 +147,90 @@ def _transport_smatrix(fsyst, *, energy_abs: float):
 
     # Use kwant's default solver route so MUMPS is picked when available.
     return kwant.smatrix(fsyst, energy=float(energy_abs))
+
+
+def _kwant_heartbeat_interval_seconds() -> float:
+    raw = str(os.environ.get("TOPOSLAB_KWANT_BENCH_HEARTBEAT_SECONDS", "60")).strip()
+    if not raw:
+        return 60.0
+    try:
+        value = float(raw)
+    except ValueError:
+        return 60.0
+    return max(0.0, value)
+
+
+def _emit_kwant_heartbeat(
+    stop_event,
+    *,
+    rank: int,
+    thickness_uc: int,
+    energy_abs_ev: float,
+    interval_seconds: float,
+) -> None:
+    start = time.monotonic()
+    while not stop_event.wait(interval_seconds):
+        elapsed = time.monotonic() - start
+        print(
+            f"[kwant-bench][rank={rank}] heartbeat thickness_uc={int(thickness_uc)} "
+            f"energy_abs_ev={float(energy_abs_ev):.6f} elapsed_s={elapsed:.1f}",
+            flush=True,
+        )
+
+
+class _KwantHeartbeat:
+    def __init__(
+        self,
+        *,
+        rank: int,
+        thickness_uc: int,
+        energy_abs_ev: float,
+        interval_seconds: float | None = None,
+    ) -> None:
+        self._rank = int(rank)
+        self._thickness_uc = int(thickness_uc)
+        self._energy_abs_ev = float(energy_abs_ev)
+        self._interval_seconds = (
+            _kwant_heartbeat_interval_seconds()
+            if interval_seconds is None
+            else max(0.0, float(interval_seconds))
+        )
+        self._stop_event = None
+        self._proc = None
+
+    def __enter__(self):
+        if self._interval_seconds <= 0.0:
+            return self
+        try:
+            ctx = mp.get_context("fork")
+        except ValueError:  # pragma: no cover - non-POSIX fallback
+            ctx = mp.get_context()
+        self._stop_event = ctx.Event()
+        self._proc = ctx.Process(
+            target=_emit_kwant_heartbeat,
+            kwargs={
+                "stop_event": self._stop_event,
+                "rank": self._rank,
+                "thickness_uc": self._thickness_uc,
+                "energy_abs_ev": self._energy_abs_ev,
+                "interval_seconds": self._interval_seconds,
+            },
+            daemon=True,
+        )
+        self._proc.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._stop_event is not None:
+            self._stop_event.set()
+        if self._proc is not None:
+            self._proc.join(timeout=max(1.0, min(5.0, self._interval_seconds)))
+            if self._proc.is_alive():  # pragma: no cover - defensive cleanup
+                self._proc.terminate()
+                self._proc.join(timeout=1.0)
+        self._proc = None
+        self._stop_event = None
+        return False
 
 
 def _energy_key(value: float) -> str:
@@ -477,7 +563,8 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
                         thickness_uc=thickness_uc,
                     )
                 fsyst, add_cells = fsys_cache[thickness_uc]
-                smat = _transport_smatrix(fsyst, energy_abs=float(eabs))
+                with _KwantHeartbeat(rank=rank, thickness_uc=thickness_uc, energy_abs_ev=eabs):
+                    smat = _transport_smatrix(fsyst, energy_abs=float(eabs))
                 t10 = float(smat.transmission(1, 0))
                 print(
                     f"[kwant-bench][rank={rank}] done thickness_uc={thickness_uc} "

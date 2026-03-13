@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import time
 
 from wtec.transport import kwant_nanowire_benchmark as knb
 
@@ -137,3 +138,27 @@ def test_run_payload_resumes_from_rank_shards_without_checkpoint(tmp_path: Path,
     assert [row["energy_rel_fermi_ev"] for row in written["results"]] == [-0.2, 0.0]
     assert calls == [1.0]
     assert not (tmp_path / "kwant_reference.rank0.jsonl").exists()
+
+
+def test_run_payload_emits_heartbeat_during_long_kwant_point(
+    tmp_path: Path, monkeypatch, capfd
+) -> None:
+    checkpoint = tmp_path / "kwant_reference.json"
+
+    monkeypatch.setenv("TOPOSLAB_KWANT_BENCH_HEARTBEAT_SECONDS", "0.05")
+    monkeypatch.setattr(knb, "_mpi_context", lambda: (None, 0, 1))
+    monkeypatch.setattr(knb, "_solver_status", lambda: {"solver": "stub", "mumps_available": True})
+    monkeypatch.setattr(knb, "_hr_dict", lambda path: (1, {(0, 0, 0): 0}))
+    monkeypatch.setattr(knb, "_build_system_from_hr", lambda h_r, length_uc, width_uc, thickness_uc: (object(), 0))
+
+    def _slow_transport(_fsyst, *, energy_abs: float):
+        time.sleep(0.18)
+        return _FakeSmatrix(12.0)
+
+    monkeypatch.setattr(knb, "_transport_smatrix", _slow_transport)
+
+    result = knb.run_payload(_payload(), checkpoint_path=checkpoint)
+
+    captured = capfd.readouterr().out
+    assert result["status"] == "ok"
+    assert "[kwant-bench][rank=0] heartbeat thickness_uc=1 energy_abs_ev=0.800000" in captured

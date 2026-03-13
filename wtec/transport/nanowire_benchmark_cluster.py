@@ -174,6 +174,19 @@ def submit_kwant_nanowire_reference(
             mpi=MPIConfig(n_cores=mpi_np, bind_to="none"),
             extra_args=f"-m wtec.transport.kwant_nanowire_benchmark {payload_path.name} {result_path.name}",
         )
+        heartbeat_interval = os.environ.get("TOPOSLAB_KWANT_BENCH_HEARTBEAT_SECONDS", "").strip()
+        env_vars = {
+            "OMP_NUM_THREADS": str(omp_threads),
+            "MKL_NUM_THREADS": str(omp_threads),
+            "OPENBLAS_NUM_THREADS": str(omp_threads),
+            "NUMEXPR_NUM_THREADS": str(omp_threads),
+            "OMP_DYNAMIC": "FALSE",
+            "MKL_DYNAMIC": "FALSE",
+            "OMP_PROC_BIND": "spread",
+            "OMP_PLACES": "cores",
+        }
+        if heartbeat_interval:
+            env_vars["TOPOSLAB_KWANT_BENCH_HEARTBEAT_SECONDS"] = heartbeat_interval
         script = generate_script(
             PBSJobConfig(
                 job_name=f"kw{canonical_input.axis}_w{spec.fixed_width_uc}_l{length_uc}"[:15],
@@ -185,16 +198,7 @@ def submit_kwant_nanowire_reference(
                 queue=queue_used,
                 work_dir=remote_dir,
                 modules=modules or cfg.modules,
-                env_vars={
-                    "OMP_NUM_THREADS": str(omp_threads),
-                    "MKL_NUM_THREADS": str(omp_threads),
-                    "OPENBLAS_NUM_THREADS": str(omp_threads),
-                    "NUMEXPR_NUM_THREADS": str(omp_threads),
-                    "OMP_DYNAMIC": "FALSE",
-                    "MKL_DYNAMIC": "FALSE",
-                    "OMP_PROC_BIND": "spread",
-                    "OMP_PLACES": "cores",
-                },
+                env_vars=env_vars,
             ),
             [cmd],
         )
