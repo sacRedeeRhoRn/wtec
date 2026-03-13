@@ -213,3 +213,26 @@ def test_run_local_tasks_appends_rank_shards_per_completion(tmp_path: Path, monk
     assert [row["energy_rel_fermi_ev"] for row in results] == [-0.2, 0.0]
     assert [row["energy_rel_fermi_ev"] for row in callback_rows] == [-0.2, 0.0]
     assert [json.loads(line)["energy_rel_fermi_ev"] for line in shard_lines] == [-0.2, 0.0]
+
+
+def test_distribute_pending_tasks_balances_heavy_thicknesses() -> None:
+    pending_tasks = [
+        (thickness_uc, energy_rel_fermi_ev, 13.6046 + float(energy_rel_fermi_ev))
+        for thickness_uc in (3, 5, 7, 9, 11, 13)
+        for energy_rel_fermi_ev in (-0.2, -0.1, 0.0, 0.1, 0.2)
+    ]
+
+    buckets = knb._distribute_pending_tasks(pending_tasks, size=16)
+    striped = [pending_tasks[rank::16] for rank in range(16)]
+
+    def _loads(groups: list[list[tuple[int, float, float]]]) -> list[int]:
+        return [sum(knb._task_cost_estimate(task) for task in group) for group in groups]
+
+    balanced_loads = _loads(buckets)
+    striped_loads = _loads(striped)
+
+    assert sorted(task for bucket in buckets for task in bucket) == sorted(pending_tasks)
+    assert max(balanced_loads) < max(striped_loads)
+    for bucket in buckets:
+        local_costs = [knb._task_cost_estimate(task) for task in bucket]
+        assert local_costs == sorted(local_costs)

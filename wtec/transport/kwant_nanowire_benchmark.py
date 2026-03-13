@@ -241,6 +241,50 @@ def _task_key(thickness_uc: int, energy_rel_fermi_ev: float) -> tuple[int, str]:
     return (int(thickness_uc), _energy_key(energy_rel_fermi_ev))
 
 
+def _task_cost_estimate(task: tuple[int, float, float]) -> int:
+    thickness_uc = max(1, int(task[0]))
+    return int(thickness_uc**3)
+
+
+def _distribute_pending_tasks(
+    pending_tasks: list[tuple[int, float, float]],
+    *,
+    size: int,
+) -> list[list[tuple[int, float, float]]]:
+    world_size = max(1, int(size))
+    if world_size == 1:
+        return [list(pending_tasks)]
+    buckets: list[list[tuple[int, tuple[int, float, float]]]] = [[] for _ in range(world_size)]
+    if not pending_tasks:
+        return [[] for _ in range(world_size)]
+
+    loads = [0 for _ in range(world_size)]
+    ranked = sorted(
+        enumerate(pending_tasks),
+        key=lambda item: (
+            -_task_cost_estimate(item[1]),
+            abs(float(item[1][1])),
+            float(item[1][1]),
+            item[0],
+        ),
+    )
+    for index, task in ranked:
+        rank = min(range(world_size), key=lambda rid: (loads[rid], len(buckets[rid]), rid))
+        buckets[rank].append((index, task))
+        loads[rank] += _task_cost_estimate(task)
+
+    def _local_order(item: tuple[int, tuple[int, float, float]]) -> tuple[int, float, float, int]:
+        index, task = item
+        return (
+            _task_cost_estimate(task),
+            abs(float(task[1])),
+            float(task[1]),
+            index,
+        )
+
+    return [[task for _, task in sorted(bucket, key=_local_order)] for bucket in buckets]
+
+
 def _expected_task_count(
     *,
     thicknesses: list[int] | tuple[int, ...],
@@ -537,7 +581,8 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
         if _task_key(int(task[0]), float(task[1])) not in completed_keys
     ]
 
-    local = pending_tasks[rank::size]
+    task_buckets = _distribute_pending_tasks(pending_tasks, size=size)
+    local = task_buckets[rank]
 
     def _partial_validation() -> dict[str, Any]:
         return {
@@ -598,6 +643,16 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
                 "[kwant-bench] "
                 f"resume completed={int(progress['completed'])}/{int(progress['expected'])} "
                 f"pending={len(pending_tasks)}",
+                flush=True,
+            )
+        if size > 1 and pending_tasks:
+            load_estimates = [sum(_task_cost_estimate(task) for task in bucket) for bucket in task_buckets]
+            counts = [len(bucket) for bucket in task_buckets]
+            print(
+                "[kwant-bench] "
+                f"distribution load_min={min(load_estimates)} "
+                f"load_max={max(load_estimates)} "
+                f"counts={counts}",
                 flush=True,
             )
 
