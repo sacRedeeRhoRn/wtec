@@ -8905,12 +8905,14 @@ def benchmark_transport(
                         )
                     )
 
+            expected_thicknesses = [int(v) for v in spec.thicknesses_uc]
+            expected_energies = [float(v) for v in spec.energies_ev]
             kwant_complete = bool(
                 kwant_result
                 and kwant_reference_is_complete(
                     kwant_result,
-                    thicknesses=[int(v) for v in spec.thicknesses_uc],
-                    energies_rel_fermi_ev=[float(v) for v in spec.energies_ev],
+                    thicknesses=expected_thicknesses,
+                    energies_rel_fermi_ev=expected_energies,
                 )
             )
 
@@ -8920,12 +8922,22 @@ def benchmark_transport(
                 else {}
             )
             raw_records = list(kwant_result.get("results", []))
-            kwant_fit = build_article_fit_summary(
-                raw_records,
-                energies_ev=spec.energies_ev,
-                thicknesses_uc=spec.thicknesses_uc,
-                trim_exclude_thicknesses_uc=spec.trim_exclude_thicknesses_uc,
-            )
+            if kwant_complete:
+                kwant_fit = build_article_fit_summary(
+                    raw_records,
+                    energies_ev=expected_energies,
+                    thicknesses_uc=expected_thicknesses,
+                    trim_exclude_thicknesses_uc=spec.trim_exclude_thicknesses_uc,
+                )
+            else:
+                kwant_fit = {
+                    "status": "incomplete",
+                    "reason": "kwant_reference_incomplete",
+                    "expected_points": int(len(expected_thicknesses) * len(expected_energies)),
+                    "completed_points": int(kwant_result.get("task_count_completed", len(raw_records))),
+                    "all_points": [],
+                    "trimmed_points": [],
+                }
             (axis_dir / "kwant_reference_raw.csv").write_text(
                 "\n".join(rows_to_csv_lines(raw_records)) + "\n",
                 encoding="utf-8",
