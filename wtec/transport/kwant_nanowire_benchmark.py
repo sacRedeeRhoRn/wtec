@@ -259,6 +259,11 @@ def _task_order_key(
     )
 
 
+def _split_thickness_groups_enabled() -> bool:
+    raw = os.environ.get("TOPOSLAB_KWANT_BENCH_SPLIT_THICKNESS_GROUPS", "")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _distribute_pending_tasks(
     pending_tasks: list[tuple[int, float, float]],
     *,
@@ -292,12 +297,14 @@ def _distribute_pending_tasks(
             )
         )
 
-    # When enough ranks are available, keep every thickness grouped, but spend
-    # additional ranks only on the cheapest thicknesses first. That preserves
-    # the big memory win from thickness-local reuse while recovering useful
-    # task-level parallelism from the widened MPI layout.
+    # Default to one rank per thickness group. This keeps the expensive Kwant
+    # finalized system built once per thickness on the cluster, which is the
+    # safer memory/throughput tradeoff on the current benchmark node. An
+    # explicit env override can re-enable the thinner-group fanout experiments.
     if world_size >= len(grouped_tasks):
         ordered_groups = sorted(grouped_tasks, key=lambda item: (item[0], item[1]))
+        if not _split_thickness_groups_enabled():
+            return [list(tasks) for _, _, tasks in ordered_groups] + [[] for _ in range(world_size - len(ordered_groups))]
         allocations: list[tuple[int, int, list[tuple[int, float, float]], int]] = []
         extra_ranks = world_size - len(ordered_groups)
         for group_load, thickness_uc, tasks in ordered_groups:
