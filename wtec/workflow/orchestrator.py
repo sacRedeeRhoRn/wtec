@@ -1621,6 +1621,10 @@ class TopoSlabWorkflow:
                 assert sigma_manifest_name is not None
                 assert sigma_left_name is not None
                 assert sigma_right_name is not None
+                # The exact-sigma precompute is a single-rank dense linear-algebra
+                # phase. Let it see the full node cpuset instead of leaving most
+                # of the PBS allocation idle on one core.
+                sigma_threads = max(1, int(cores_per_node))
                 sigma_cmd = build_command(
                     f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_exe}",
                     mpi=MPIConfig(n_cores=1, bind_to="none"),
@@ -1635,6 +1639,11 @@ class TopoSlabWorkflow:
                         "--layout full_finite_principal "
                         f"--out-dir {shlex.quote('.')}"
                     ),
+                )
+                sigma_cmd = self._thread_exports(
+                    sigma_cmd,
+                    threads=sigma_threads,
+                    full_node_threading=bool(sigma_threads > 1),
                 )
                 commands.append(sigma_cmd)
             commands.append(cmd)

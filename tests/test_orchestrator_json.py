@@ -836,6 +836,13 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
     assert meta["job_id"] == "1003"
     assert results["meta"]["transport_engine"] == "rgf"
     assert "wtec.transport.kwant_sigma_extract" in str(captured["script"])
+    assert (
+        "export OMP_NUM_THREADS=32; export MKL_NUM_THREADS=32; export OPENBLAS_NUM_THREADS=32; "
+        "export NUMEXPR_NUM_THREADS=32; export OMP_PROC_BIND=spread; export OMP_PLACES=threads; "
+        "export I_MPI_PIN=0; export OMPI_MCA_hwloc_base_binding_policy=none; "
+        "export PRTE_MCA_hwloc_base_binding_policy=none; mpirun -np 1 "
+        "env PYTHONPATH=$PWD/wtec_src.zip:$PYTHONPATH python3 -m wtec.transport.kwant_sigma_extract"
+    ) in str(captured["script"])
     assert "--layout full_finite_principal" in str(captured["script"])
     assert "--hr-path " in str(captured["script"])
     assert "_canonical_hr.dat" in str(captured["script"])
