@@ -8356,22 +8356,52 @@ def _write_partial_nanowire_axis_artifacts(
     *,
     axis_dir: Path,
     spec: Any,
+    summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from wtec.transport.nanowire_benchmark_progress import (
         compare_partial_benchmark_progress,
         render_partial_comparison_markdown,
     )
 
-    summary = compare_partial_benchmark_progress(
-        kwant_dir=axis_dir / "kwant",
-        rgf_root=axis_dir / "rgf",
-        spec=spec,
-    )
+    if summary is None:
+        summary = compare_partial_benchmark_progress(
+            kwant_dir=axis_dir / "kwant",
+            rgf_root=axis_dir / "rgf",
+            spec=spec,
+        )
     (axis_dir / "comparison_partial.json").write_text(json.dumps(summary, indent=2))
     (axis_dir / "comparison_partial.md").write_text(
         render_partial_comparison_markdown(summary),
         encoding="utf-8",
     )
+    return summary
+
+
+def _load_existing_nanowire_partial_overlap(
+    *,
+    axis_dir: Path,
+    spec: Any,
+) -> dict[str, Any] | None:
+    from wtec.transport.nanowire_benchmark_progress import (
+        compare_partial_benchmark_progress,
+    )
+
+    kwant_dir = axis_dir / "kwant"
+    rgf_root = axis_dir / "rgf"
+    if not kwant_dir.exists() or not rgf_root.exists():
+        return None
+    try:
+        summary = compare_partial_benchmark_progress(
+            kwant_dir=kwant_dir,
+            rgf_root=rgf_root,
+            spec=spec,
+        )
+    except FileNotFoundError:
+        return None
+    comparison = summary.get("comparison")
+    overlap_points = int(summary.get("overlap_points", 0) or 0)
+    if overlap_points <= 0 or not isinstance(comparison, dict):
+        return None
     return summary
 
 
@@ -8816,6 +8846,59 @@ def benchmark_transport(
                     )
                 )
             else:
+                existing_partial_summary = None
+                if model.primary_for_rgf:
+                    existing_partial_summary = _load_existing_nanowire_partial_overlap(
+                        axis_dir=axis_dir,
+                        spec=spec,
+                    )
+                if existing_partial_summary is not None:
+                    partial_comparison = existing_partial_summary.get("comparison")
+                    if (
+                        isinstance(partial_comparison, dict)
+                        and str(partial_comparison.get("status", "")).strip().lower() == "failed"
+                    ):
+                        partial_summary = _write_partial_nanowire_axis_artifacts(
+                            axis_dir=axis_dir,
+                            spec=spec,
+                            summary=existing_partial_summary,
+                        )
+                        kwant_checkpoint = _load_nanowire_kwant_reference_checkpoint(kwant_reference_path) or {}
+                        kwant_validation = (
+                            kwant_checkpoint.get("validation", {})
+                            if isinstance(kwant_checkpoint.get("validation"), dict)
+                            else {}
+                        )
+                        axis_summary = {
+                            "status": "failed",
+                            "reason": "rgf_partial_validation_failed",
+                            "length_uc": int(length_uc),
+                            "fixed_width_uc": int(spec.fixed_width_uc),
+                            "principal_layer_width": int(p_eff),
+                            "kwant_job": {
+                                "status": "reused_partial_failure",
+                                "path": str(kwant_reference_path if kwant_reference_path.exists() else kwant_benchmark_dir),
+                            },
+                            "kwant_complete": False,
+                            "kwant_validation": kwant_validation,
+                            "kwant_fit_status": "incomplete",
+                            "partial_overlap": {
+                                "status": str(partial_summary.get("status", "unknown")),
+                                "overlap_points": int(partial_summary.get("overlap_points", 0) or 0),
+                                "comparison": partial_summary.get("comparison"),
+                                "missing_in_rgf": len(partial_summary.get("missing_in_rgf", []) or []),
+                                "missing_in_kwant": len(partial_summary.get("missing_in_kwant", []) or []),
+                            },
+                        }
+                        failed_targets.append(f"{model.key}:{axis}:rgf_partial")
+                        model_summary["axes"][axis] = axis_summary
+                        click.echo(
+                            click.style(
+                                f"[benchmark] model={model.key} axis={axis}: existing overlap already proves failure; skipping new PBS submissions",
+                                fg="yellow",
+                            )
+                        )
+                        continue
                 if kwant_reference_path.exists():
                     click.echo(
                         click.style(

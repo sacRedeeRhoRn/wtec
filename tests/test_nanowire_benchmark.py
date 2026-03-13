@@ -583,6 +583,129 @@ def test_benchmark_transport_writes_failed_summary_from_partial_overlap(tmp_path
     assert partial["comparison"]["checked_points"] == 1
 
 
+def test_benchmark_transport_uses_existing_log_overlap_before_launch(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "run_small.json"
+    config_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "bench"
+    axis_dir = output_dir / "model_b" / "c"
+    kwant_dir = axis_dir / "kwant"
+    rgf_dir = axis_dir / "rgf" / "d01_e0p0" / "transport" / "primary"
+    kwant_dir.mkdir(parents=True, exist_ok=True)
+    rgf_dir.mkdir(parents=True, exist_ok=True)
+    hr_path = tmp_path / "TiS_hr.dat"
+    win_path = tmp_path / "TiS.win"
+    hr_path.write_text("dummy", encoding="utf-8")
+    win_path.write_text("dummy", encoding="utf-8")
+
+    (kwant_dir / "kwant_payload.json").write_text(
+        json.dumps({"fermi_ev": 13.6046}),
+        encoding="utf-8",
+    )
+    (kwant_dir / "kwant_reference.json").write_text(
+        json.dumps(
+            {
+                "status": "partial",
+                "task_count_expected": 2,
+                "task_count_completed": 0,
+                "results": [],
+                "validation": {"status": "partial"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (kwant_dir / "wtec_job.log").write_text(
+        "[kwant-bench][rank=0] done thickness_uc=1 energy_abs_ev=13.604600 transmission=40.000000000000\n",
+        encoding="utf-8",
+    )
+    (rgf_dir / "transport_payload_primary_001.json").write_text(
+        json.dumps(
+            {
+                "thicknesses": [1],
+                "disorder_strengths": [0.0],
+                "mfp_lengths": [],
+                "energy": 13.6046,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (rgf_dir / "transport_result.json").write_text(
+        json.dumps({"transport_results": {"thickness_scan": {"0.0": {"G_mean": [29.88663916904678]}}}}),
+        encoding="utf-8",
+    )
+
+    spec = SimpleNamespace(
+        mp_id="mp-1018028",
+        material="TiS",
+        axes=("c",),
+        energies_ev=(0.0,),
+        thicknesses_uc=(1, 2),
+        fixed_width_uc=13,
+        trim_exclude_thicknesses_uc=(),
+        abs_tol=5.0e-3,
+        rel_tol=5.0e-4,
+        zero_tol=1.0e-12,
+        fit_r2_abs_tol=1.0e-3,
+    )
+    model = SimpleNamespace(
+        key="model_b",
+        label="Model B",
+        custom_projections=[],
+        primary_for_rgf=True,
+    )
+
+    monkeypatch.setattr("wtec.cli._load_runtime_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("wtec.cli._load_run_config", lambda _path: {"n_nodes": 1})
+    monkeypatch.setattr("wtec.cli._ensure_nanowire_benchmark_rgf_router_ready", lambda **_kwargs: {})
+    monkeypatch.setattr("wtec.cli._resolve_nanowire_benchmark_source_structure", lambda **_kwargs: "")
+    monkeypatch.setattr("wtec.cli._build_nanowire_benchmark_source_seed", lambda **_kwargs: {})
+    monkeypatch.setattr("wtec.cli._load_benchmark_source_resume", lambda _root: (hr_path, win_path, 13.6046))
+    monkeypatch.setattr("wtec.transport.nanowire_benchmark.NanowireBenchmarkSpec", lambda: spec)
+    monkeypatch.setattr("wtec.transport.nanowire_benchmark.select_benchmark_models", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(
+        "wtec.transport.nanowire_benchmark.prepare_canonicalized_inputs",
+        lambda **_kwargs: SimpleNamespace(hr_dat_path=str(hr_path)),
+    )
+    monkeypatch.setattr("wtec.wannier.parser.read_hr_dat", lambda _path: object())
+    monkeypatch.setattr("wtec.rgf.effective_principal_layer_width", lambda *args, **kwargs: 1)
+    monkeypatch.setattr("wtec.transport.nanowire_benchmark.compute_length_uc", lambda *_args, **_kwargs: 24)
+    monkeypatch.setattr(
+        "wtec.transport.nanowire_benchmark_cluster.submit_kwant_nanowire_reference",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new Kwant submission should be skipped")),
+    )
+    monkeypatch.setattr(
+        "wtec.cli._run_rgf_benchmark_axis",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("new RGF launch should be skipped")),
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "benchmark-transport",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--queue",
+            "g4",
+            "--walltime",
+            "01:00:00",
+        ],
+    )
+
+    assert result.exit_code == 1
+    summary_path = output_dir / "benchmark_summary.json"
+    partial_path = axis_dir / "comparison_partial.json"
+    assert summary_path.exists()
+    assert partial_path.exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert "model_b:c:rgf_partial" in summary["failed_targets"]
+    partial = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert partial["status"] == "failed"
+    assert partial["comparison"]["checked_points"] == 1
+    assert partial["kwant"]["rows"][0]["source_kind"] == "kwant_log"
+
+
 def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
     tmp_path: Path, monkeypatch
 ) -> None:
