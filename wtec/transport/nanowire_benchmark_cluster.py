@@ -14,6 +14,7 @@ from wtec.cluster.submit import JobManager
 from wtec.config.cluster import ClusterConfig
 from wtec.transport.nanowire_benchmark import CanonicalizedNanowireInput, NanowireBenchmarkSpec
 from wtec.transport.kwant_nanowire_benchmark import (
+    kwant_reference_checkpoint_payload,
     kwant_reference_is_complete,
     kwant_reference_progress,
 )
@@ -196,7 +197,12 @@ def submit_kwant_nanowire_reference(
                     script,
                     remote_dir=remote_dir,
                     local_dir=benchmark_path,
-                    retrieve_patterns=[result_path.name, "*.out", "wtec_job.log"],
+                    retrieve_patterns=[
+                        result_path.name,
+                        f"{result_path.stem}.rank*.jsonl",
+                        "*.out",
+                        "wtec_job.log",
+                    ],
                     script_name=script_path.name,
                     stage_files=[payload_path, worker_zip, Path(canonical_input.hr_dat_path)],
                     expected_local_outputs=[result_path.name],
@@ -213,8 +219,12 @@ def submit_kwant_nanowire_reference(
             except RuntimeError as exc:
                 if cancel_event is not None and hasattr(cancel_event, "is_set") and cancel_event.is_set():
                     raise CancelledError("Kwant reference job cancelled.") from exc
-                if result_path.exists():
-                    partial = json.loads(result_path.read_text())
+                if result_path.exists() or list(benchmark_path.glob(f"{result_path.stem}.rank*.jsonl")):
+                    partial = kwant_reference_checkpoint_payload(
+                        result_path,
+                        thicknesses=spec.thicknesses_uc,
+                        energies_rel_fermi_ev=spec.energies_ev,
+                    )
                     if not kwant_reference_is_complete(
                         partial,
                         thicknesses=spec.thicknesses_uc,
@@ -234,7 +244,11 @@ def submit_kwant_nanowire_reference(
                             )
                             continue
                 raise
-            result = json.loads(result_path.read_text())
+            result = kwant_reference_checkpoint_payload(
+                result_path,
+                thicknesses=spec.thicknesses_uc,
+                energies_rel_fermi_ev=spec.energies_ev,
+            )
             if kwant_reference_is_complete(
                 result,
                 thicknesses=spec.thicknesses_uc,

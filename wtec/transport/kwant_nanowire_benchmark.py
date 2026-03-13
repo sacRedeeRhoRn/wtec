@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import suppress
 import json
 import os
 from datetime import datetime
@@ -162,6 +163,104 @@ def _expected_task_count(
     return int(len(list(thicknesses)) * len(list(energies_rel_fermi_ev)))
 
 
+def _checkpoint_shard_glob(checkpoint_path: Path) -> str:
+    return f"{checkpoint_path.stem}.rank*.jsonl"
+
+
+def _checkpoint_shard_path(checkpoint_path: Path, *, rank: int) -> Path:
+    return checkpoint_path.with_name(f"{checkpoint_path.stem}.rank{int(rank)}.jsonl")
+
+
+def _checkpoint_rows_by_key(checkpoint_path: Path | None) -> dict[tuple[int, str], dict[str, Any]]:
+    rows_by_key: dict[tuple[int, str], dict[str, Any]] = {}
+    if checkpoint_path is None:
+        return rows_by_key
+
+    def _remember(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        try:
+            key = _task_key(
+                int(row.get("thickness_uc", 0)),
+                float(row.get("energy_rel_fermi_ev", 0.0)),
+            )
+        except Exception:
+            return
+        rows_by_key[key] = row
+
+    if checkpoint_path.exists():
+        with suppress(Exception):
+            existing_payload = json.loads(checkpoint_path.read_text())
+            for row in list(existing_payload.get("results", [])):
+                _remember(row)
+
+    for shard_path in sorted(checkpoint_path.parent.glob(_checkpoint_shard_glob(checkpoint_path))):
+        with suppress(Exception):
+            for line in shard_path.read_text().splitlines():
+                if line.strip():
+                    _remember(json.loads(line))
+
+    return rows_by_key
+
+
+def _append_checkpoint_shard(
+    checkpoint_path: Path | None,
+    *,
+    rank: int,
+    row: dict[str, Any],
+) -> None:
+    if checkpoint_path is None:
+        return
+    shard_path = _checkpoint_shard_path(checkpoint_path, rank=rank)
+    with shard_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def _cleanup_checkpoint_shards(checkpoint_path: Path | None) -> None:
+    if checkpoint_path is None:
+        return
+    for shard_path in checkpoint_path.parent.glob(_checkpoint_shard_glob(checkpoint_path)):
+        with suppress(OSError):
+            shard_path.unlink()
+
+
+def kwant_reference_checkpoint_payload(
+    checkpoint_path: Path,
+    *,
+    thicknesses: list[int] | tuple[int, ...] | None = None,
+    energies_rel_fermi_ev: list[float] | tuple[float, ...] | None = None,
+) -> dict[str, Any]:
+    base_payload: dict[str, Any] = {}
+    if checkpoint_path.exists():
+        with suppress(Exception):
+            maybe_payload = json.loads(checkpoint_path.read_text())
+            if isinstance(maybe_payload, dict):
+                base_payload = maybe_payload
+
+    rows_by_key = _checkpoint_rows_by_key(checkpoint_path)
+    results = sorted(
+        rows_by_key.values(),
+        key=lambda row: (int(row["thickness_uc"]), float(row["energy_rel_fermi_ev"])),
+    )
+    expected = int(base_payload.get("task_count_expected", 0) or 0)
+    if expected <= 0 and thicknesses is not None and energies_rel_fermi_ev is not None:
+        expected = _expected_task_count(
+            thicknesses=thicknesses,
+            energies_rel_fermi_ev=energies_rel_fermi_ev,
+        )
+    completed = int(len(results))
+    out = dict(base_payload)
+    out["results"] = results
+    out["task_count_expected"] = int(expected)
+    out["task_count_completed"] = int(completed)
+    out["status"] = "ok" if expected > 0 and completed >= expected else str(
+        base_payload.get("status", "partial")
+    )
+    if "validation" not in out or not isinstance(out.get("validation"), dict):
+        out["validation"] = {"status": "partial"}
+    return out
+
+
 def kwant_reference_progress(
     result: dict[str, Any],
     *,
@@ -278,20 +377,8 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
             tasks.append((int(thickness_uc), float(de), float(eabs)))
 
     existing_results_by_key: dict[tuple[int, str], dict[str, Any]] = {}
-    if rank == 0 and checkpoint_path is not None and checkpoint_path.exists():
-        try:
-            existing_payload = json.loads(checkpoint_path.read_text())
-        except Exception:
-            existing_payload = {}
-        for row in list(existing_payload.get("results", [])):
-            if not isinstance(row, dict):
-                continue
-            existing_results_by_key[
-                _task_key(
-                    int(row.get("thickness_uc", 0)),
-                    float(row.get("energy_rel_fermi_ev", 0.0)),
-                )
-            ] = row
+    if rank == 0:
+        existing_results_by_key = _checkpoint_rows_by_key(checkpoint_path)
     completed_keys = set(existing_results_by_key)
     if comm is not None:
         completed_keys = set(comm.bcast(completed_keys, root=0))
@@ -408,6 +495,7 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
                     "model_label": model_label,
                     "rank": int(rank),
                 }
+                _append_checkpoint_shard(checkpoint_path, rank=rank, row=round_result)
             except Exception as exc:  # pragma: no cover - runtime dependent
                 round_error = (
                     f"rank={rank}, thickness_uc={thickness_uc}, energy_abs_ev={eabs}, "
@@ -497,7 +585,9 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
                         }
                     )
 
-    return _write_checkpoint(merged, status="ok", validation=validation)
+    result = _write_checkpoint(merged, status="ok", validation=validation)
+    _cleanup_checkpoint_shards(checkpoint_path)
+    return result
 
 
 def main(argv: list[str] | None = None) -> int:
