@@ -8468,7 +8468,12 @@ def _run_kwant_and_rgf_overlap(
     help="Local benchmark workspace. Default: .wtec/references/nanowire_benchmarks/mp-1018028",
 )
 @click.option("--queue", default="g4", show_default=True, help="PBS queue for benchmark submissions.")
-@click.option("--walltime", default="01:00:00", show_default=True, help="PBS walltime per benchmark job.")
+@click.option(
+    "--walltime",
+    default="01:00:00",
+    show_default=True,
+    help="PBS walltime per native-RGF benchmark case; the Kwant baseline scales this by worker waves.",
+)
 @click.option(
     "--live-log/--no-live-log",
     default=True,

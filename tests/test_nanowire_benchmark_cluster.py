@@ -87,6 +87,7 @@ def test_submit_kwant_nanowire_reference_uses_conservative_multi_rank_layout(
 
     script = str(seen["script"])
     assert "#PBS -l select=1:ncpus=64:mpiprocs=4:ompthreads=16" in script
+    assert "#PBS -l walltime=09:00:00" in script
     assert "export OMP_NUM_THREADS=16" in script
     assert "export MKL_NUM_THREADS=16" in script
     assert "export OPENBLAS_NUM_THREADS=16" in script
@@ -101,6 +102,27 @@ def test_kwant_worker_layout_honors_env_override(monkeypatch) -> None:
     mpi_np, omp_threads = nbcluster._kwant_worker_layout(total_cores=64, task_count=35, n_nodes=1)
     assert mpi_np == 2
     assert omp_threads == 32
+
+
+def test_resolve_kwant_reference_walltime_scales_by_worker_waves() -> None:
+    walltime = nbcluster._resolve_kwant_reference_walltime(
+        base_walltime="01:00:00",
+        total_cores=64,
+        task_count=35,
+        n_nodes=1,
+    )
+    assert walltime == "09:00:00"
+
+
+def test_resolve_kwant_reference_walltime_honors_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("TOPOSLAB_KWANT_BENCH_WALLTIME", "02:30:00")
+    walltime = nbcluster._resolve_kwant_reference_walltime(
+        base_walltime="01:00:00",
+        total_cores=64,
+        task_count=35,
+        n_nodes=1,
+    )
+    assert walltime == "02:30:00"
 
 
 def test_submit_kwant_nanowire_reference_forwards_cancel_event(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import CancelledError
 import json
+import math
 import os
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,49 @@ def _kwant_worker_layout(*, total_cores: int, task_count: int, n_nodes: int) -> 
         mpi_np = min(mpi_np, max_ranks)
     omp_threads = max(1, int(total_cores) // max(1, int(mpi_np)))
     return int(mpi_np), int(omp_threads)
+
+
+def _parse_walltime_seconds(value: str) -> int:
+    text = str(value or "").strip()
+    parts = text.split(":")
+    if len(parts) != 3 or any((not part.isdigit()) for part in parts):
+        raise ValueError(f"walltime must use HH:MM:SS, got {value!r}")
+    hours, minutes, seconds = (int(part) for part in parts)
+    if minutes >= 60 or seconds >= 60:
+        raise ValueError(f"walltime must use HH:MM:SS, got {value!r}")
+    return hours * 3600 + minutes * 60 + seconds
+
+
+def _format_walltime_seconds(total_seconds: int) -> str:
+    seconds = max(1, int(total_seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+
+
+def _resolve_kwant_reference_walltime(
+    *,
+    base_walltime: str,
+    total_cores: int,
+    task_count: int,
+    n_nodes: int,
+) -> str:
+    override_raw = os.environ.get("TOPOSLAB_KWANT_BENCH_WALLTIME", "").strip()
+    if override_raw:
+        return _format_walltime_seconds(_parse_walltime_seconds(override_raw))
+
+    base_seconds = _parse_walltime_seconds(base_walltime)
+    mpi_np, _ = _kwant_worker_layout(
+        total_cores=int(total_cores),
+        task_count=int(task_count),
+        n_nodes=int(n_nodes),
+    )
+    worker_waves = max(1, math.ceil(int(task_count) / max(1, int(mpi_np))))
+    # Native-RGF gets one PBS allocation per benchmark point, while the Kwant
+    # baseline batches many points into one job. Scale the shared walltime by
+    # the number of worker waves so the Kwant reference gets an equivalent
+    # per-wave budget instead of timing out mid-benchmark.
+    return _format_walltime_seconds(max(base_seconds, worker_waves * base_seconds))
 
 
 def submit_kwant_nanowire_reference(
@@ -99,6 +143,12 @@ def submit_kwant_nanowire_reference(
             task_count=task_count,
             n_nodes=int(n_nodes),
         )
+        resolved_walltime = _resolve_kwant_reference_walltime(
+            base_walltime=str(walltime),
+            total_cores=total_cores,
+            task_count=task_count,
+            n_nodes=int(n_nodes),
+        )
         cmd = build_command(
             f"env PYTHONPATH=$PWD/{worker_zip.name}:$PYTHONPATH {python_executable}",
             mpi=MPIConfig(n_cores=mpi_np, bind_to="none"),
@@ -111,7 +161,7 @@ def submit_kwant_nanowire_reference(
                 n_cores_per_node=int(cores_per_node),
                 mpi_procs_per_node=max(1, int(mpi_np) // max(1, int(n_nodes))),
                 omp_threads=int(omp_threads),
-                walltime=str(walltime),
+                walltime=resolved_walltime,
                 queue=queue_used,
                 work_dir=remote_dir,
                 modules=modules or cfg.modules,
