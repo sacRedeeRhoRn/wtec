@@ -12,6 +12,7 @@ from click.testing import CliRunner
 
 from wtec.cli import (
     _KwantOverlapError,
+    _PartialOverlapFailure,
     _append_nanowire_benchmark_trace,
     _build_nanowire_benchmark_source_seed,
     _build_tis_benchmark_source_cfg,
@@ -445,6 +446,49 @@ def test_run_kwant_and_rgf_overlap_preserves_rgf_rows_on_kwant_runtime_error() -
     assert excinfo.value.rgf_jobs == [{"job_id": "rgf"}]
 
 
+def test_run_kwant_and_rgf_overlap_preserves_partial_summary_on_rgf_partial_failure() -> None:
+    kwant_started = Event()
+    kwant_cancelled = Event()
+    partial_summary = {
+        "status": "failed",
+        "overlap_points": 1,
+        "comparison": {
+            "status": "failed",
+            "checked_points": 1,
+            "max_abs_err": 0.1,
+            "max_rel_err": 0.01,
+            "failures": [],
+        },
+    }
+
+    def _submit_kwant_reference(cancel_event=None):
+        kwant_started.set()
+        assert cancel_event is not None
+        assert cancel_event.wait(timeout=2.0)
+        kwant_cancelled.set()
+        raise CancelledError("kwant cancelled")
+
+    def _run_rgf_axis():
+        assert kwant_started.wait(timeout=2.0)
+        raise _PartialOverlapFailure(
+            "overlap failed",
+            partial_summary=partial_summary,
+            rgf_rows=[{"thickness_uc": 1}],
+            rgf_jobs=[{"job_id": "rgf"}],
+        )
+
+    with pytest.raises(_KwantOverlapError, match="overlap failed") as excinfo:
+        _run_kwant_and_rgf_overlap(
+            submit_kwant_reference=_submit_kwant_reference,
+            run_rgf_axis=_run_rgf_axis,
+        )
+
+    assert kwant_cancelled.is_set()
+    assert excinfo.value.rgf_rows == [{"thickness_uc": 1}]
+    assert excinfo.value.rgf_jobs == [{"job_id": "rgf"}]
+    assert excinfo.value.partial_summary == partial_summary
+
+
 def test_benchmark_transport_writes_failed_summary_from_partial_overlap(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "run_small.json"
     config_path.write_text("{}", encoding="utf-8")
@@ -581,6 +625,138 @@ def test_benchmark_transport_writes_failed_summary_from_partial_overlap(tmp_path
     partial = json.loads(partial_path.read_text(encoding="utf-8"))
     assert partial["status"] == "failed"
     assert partial["comparison"]["checked_points"] == 1
+
+
+def test_benchmark_transport_writes_failed_summary_from_live_partial_overlap(tmp_path: Path, monkeypatch) -> None:
+    config_path = tmp_path / "run_small.json"
+    config_path.write_text("{}", encoding="utf-8")
+    output_dir = tmp_path / "bench"
+    hr_path = tmp_path / "TiS_hr.dat"
+    win_path = tmp_path / "TiS.win"
+    hr_path.write_text("dummy", encoding="utf-8")
+    win_path.write_text("dummy", encoding="utf-8")
+
+    spec = SimpleNamespace(
+        mp_id="mp-1018028",
+        material="TiS",
+        axes=("c",),
+        energies_ev=(0.0,),
+        thicknesses_uc=(1, 2),
+        fixed_width_uc=13,
+        trim_exclude_thicknesses_uc=(),
+        abs_tol=5.0e-3,
+        rel_tol=5.0e-4,
+        zero_tol=1.0e-12,
+        fit_r2_abs_tol=1.0e-3,
+    )
+    model = SimpleNamespace(
+        key="model_b",
+        label="Model B",
+        custom_projections=[],
+        primary_for_rgf=True,
+    )
+    partial_summary = {
+        "status": "failed",
+        "kwant": {
+            "rows": [
+                {
+                    "thickness_uc": 1,
+                    "energy_rel_fermi_ev": 0.0,
+                    "energy_abs_ev": 13.6046,
+                    "transmission_e2_over_h": 40.0,
+                    "source_kind": "kwant_log",
+                    "source_path": "wtec_job.log",
+                }
+            ],
+            "row_count": 1,
+            "validation": {"status": "partial"},
+        },
+        "rgf": {
+            "rows": [
+                {
+                    "thickness_uc": 1,
+                    "energy_rel_fermi_ev": 0.0,
+                    "energy_abs_ev": 13.6046,
+                    "transmission_e2_over_h": 29.88663916904678,
+                    "source_kind": "rgf_transport_result",
+                    "source_path": "transport_result.json",
+                }
+            ],
+            "row_count": 1,
+        },
+        "overlap_points": 1,
+        "comparison": {
+            "status": "failed",
+            "checked_points": 1,
+            "max_abs_err": 10.113360830953447,
+            "max_rel_err": 0.2528340207738347,
+            "failures": [],
+        },
+        "missing_in_rgf": [],
+        "missing_in_kwant": [],
+    }
+
+    monkeypatch.setattr("wtec.cli._load_runtime_dotenv", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("wtec.cli._load_run_config", lambda _path: {"n_nodes": 1})
+    monkeypatch.setattr("wtec.cli._ensure_nanowire_benchmark_rgf_router_ready", lambda **_kwargs: {})
+    monkeypatch.setattr("wtec.cli._resolve_nanowire_benchmark_source_structure", lambda **_kwargs: "")
+    monkeypatch.setattr("wtec.cli._build_nanowire_benchmark_source_seed", lambda **_kwargs: {})
+    monkeypatch.setattr("wtec.cli._load_benchmark_source_resume", lambda _root: (hr_path, win_path, 13.6046))
+    monkeypatch.setattr("wtec.transport.nanowire_benchmark.NanowireBenchmarkSpec", lambda: spec)
+    monkeypatch.setattr("wtec.transport.nanowire_benchmark.select_benchmark_models", lambda *_args, **_kwargs: [model])
+    monkeypatch.setattr(
+        "wtec.transport.nanowire_benchmark.prepare_canonicalized_inputs",
+        lambda **_kwargs: SimpleNamespace(hr_dat_path=str(hr_path)),
+    )
+    monkeypatch.setattr("wtec.wannier.parser.read_hr_dat", lambda _path: object())
+    monkeypatch.setattr("wtec.rgf.effective_principal_layer_width", lambda *args, **kwargs: 1)
+    monkeypatch.setattr("wtec.transport.nanowire_benchmark.compute_length_uc", lambda *_args, **_kwargs: 24)
+
+    def _fake_submit_kwant_reference(cancel_event=None, **_kwargs):
+        assert cancel_event is not None
+        assert cancel_event.wait(timeout=2.0)
+        raise CancelledError("kwant cancelled")
+
+    def _fake_run_rgf_axis(**_kwargs):
+        raise _PartialOverlapFailure(
+            "Current overlap already proves benchmark failure for model_b:c",
+            partial_summary=partial_summary,
+            rgf_rows=[partial_summary["rgf"]["rows"][0]],
+            rgf_jobs=[{"job_id": "60252"}],
+        )
+
+    monkeypatch.setattr(
+        "wtec.transport.nanowire_benchmark_cluster.submit_kwant_nanowire_reference",
+        _fake_submit_kwant_reference,
+    )
+    monkeypatch.setattr("wtec.cli._run_rgf_benchmark_axis", _fake_run_rgf_axis)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        main,
+        [
+            "benchmark-transport",
+            str(config_path),
+            "--output-dir",
+            str(output_dir),
+            "--queue",
+            "g4",
+            "--walltime",
+            "01:00:00",
+        ],
+    )
+
+    assert result.exit_code == 1
+    summary_path = output_dir / "benchmark_summary.json"
+    partial_path = output_dir / "model_b" / "c" / "comparison_partial.json"
+    assert summary_path.exists()
+    assert partial_path.exists()
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert summary["status"] == "failed"
+    assert "model_b:c:rgf_partial" in summary["failed_targets"]
+    partial = json.loads(partial_path.read_text(encoding="utf-8"))
+    assert partial["status"] == "failed"
+    assert partial["kwant"]["rows"][0]["source_kind"] == "kwant_log"
 
 
 def test_benchmark_transport_uses_existing_log_overlap_before_launch(tmp_path: Path, monkeypatch) -> None:
@@ -754,6 +930,55 @@ def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
     assert jobs == [{"job_id": "12345"}]
     assert seen_cfgs and seen_cfgs[0]["_transport_rgf_internal_sigma_mode"] == "kwant_exact"
     assert seen_cfgs[0]["reuse_transport_results"] is True
+
+
+def test_run_rgf_benchmark_axis_stops_when_partial_overlap_fails(tmp_path: Path, monkeypatch) -> None:
+    class _FakeWorkflow:
+        def __init__(self, cfg: dict) -> None:
+            self.cfg = cfg
+
+        def _stage_transport_rgf_qsub(self, hr_path: Path, label: str = "primary"):
+            return (
+                {
+                    "thickness_scan": {"0.0": {"G_mean": [12.5]}},
+                },
+                {"job_id": "12345"},
+            )
+
+    monkeypatch.setattr(
+        "wtec.workflow.orchestrator.TopoSlabWorkflow.from_config",
+        lambda cfg: _FakeWorkflow(cfg),
+    )
+    monkeypatch.setattr(
+        "wtec.cli._load_existing_nanowire_partial_overlap",
+        lambda **_kwargs: {
+            "status": "failed",
+            "overlap_points": 1,
+            "comparison": {
+                "status": "failed",
+                "checked_points": 1,
+                "max_abs_err": 0.1,
+                "max_rel_err": 0.01,
+                "failures": [],
+            },
+        },
+    )
+
+    with pytest.raises(_PartialOverlapFailure, match="Current overlap already proves benchmark failure"):
+        _run_rgf_benchmark_axis(
+            source_cfg={"material": "TiS"},
+            axis_dir=tmp_path / "axis",
+            canonical=SimpleNamespace(hr_dat_path=str(tmp_path / "toy_hr.dat")),
+            model=SimpleNamespace(key="model_b"),
+            axis="c",
+            spec=SimpleNamespace(thicknesses_uc=(1,), energies_ev=(-0.2,), fixed_width_uc=13),
+            fermi_ev_f=13.6046,
+            length_uc=24,
+            transport_nodes=1,
+            live_log=False,
+            log_poll_interval=5,
+            stale_log_seconds=300,
+        )
 
 
 def test_axis_permutation_maps_expected_axes() -> None:

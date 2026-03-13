@@ -8405,6 +8405,38 @@ def _load_existing_nanowire_partial_overlap(
     return summary
 
 
+def _kwant_checkpoint_from_partial_summary(
+    *,
+    partial_summary: dict[str, Any],
+    spec: Any,
+) -> dict[str, Any] | None:
+    kwant = partial_summary.get("kwant")
+    if not isinstance(kwant, dict):
+        return None
+    rows = kwant.get("rows")
+    if not isinstance(rows, list) or not rows:
+        return None
+    validation = kwant.get("validation", {})
+    if not isinstance(validation, dict):
+        validation = {}
+    return {
+        "status": str(partial_summary.get("status", "partial") or "partial"),
+        "task_count_expected": int(len(spec.thicknesses_uc) * len(spec.energies_ev)),
+        "task_count_completed": int(len(rows)),
+        "results": [
+            {
+                "thickness_uc": int(row["thickness_uc"]),
+                "energy_rel_fermi_ev": float(row.get("energy_rel_fermi_ev", 0.0)),
+                "energy_abs_ev": float(row["energy_abs_ev"]),
+                "transmission_e2_over_h": float(row["transmission_e2_over_h"]),
+            }
+            for row in rows
+            if isinstance(row, dict)
+        ],
+        "validation": validation,
+    }
+
+
 class _KwantOverlapError(RuntimeError):
     def __init__(
         self,
@@ -8412,8 +8444,25 @@ class _KwantOverlapError(RuntimeError):
         *,
         rgf_rows: list[dict[str, Any]],
         rgf_jobs: list[dict[str, Any]],
+        partial_summary: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
+        self.rgf_rows = list(rgf_rows)
+        self.rgf_jobs = list(rgf_jobs)
+        self.partial_summary = None if partial_summary is None else dict(partial_summary)
+
+
+class _PartialOverlapFailure(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial_summary: dict[str, Any],
+        rgf_rows: list[dict[str, Any]],
+        rgf_jobs: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(message)
+        self.partial_summary = dict(partial_summary)
         self.rgf_rows = list(rgf_rows)
         self.rgf_jobs = list(rgf_jobs)
 
@@ -8527,6 +8576,30 @@ def _run_rgf_benchmark_axis(
                     "transmission_e2_over_h": _extract_single_transmission_from_rgf(rgf_result),
                 }
             )
+            partial_summary = _load_existing_nanowire_partial_overlap(
+                axis_dir=axis_dir,
+                spec=spec,
+            )
+            if partial_summary is not None:
+                partial_comparison = partial_summary.get("comparison")
+                if (
+                    isinstance(partial_comparison, dict)
+                    and str(partial_comparison.get("status", "")).strip().lower() == "failed"
+                ):
+                    _append_nanowire_benchmark_trace(
+                        trace_path,
+                        "rgf_case_partial_failure",
+                        tag=tag,
+                        run_dir=str(run_root),
+                        overlap_points=int(partial_summary.get("overlap_points", 0) or 0),
+                        max_abs_err=float(partial_comparison.get("max_abs_err", 0.0) or 0.0),
+                    )
+                    raise _PartialOverlapFailure(
+                        f"Current overlap already proves benchmark failure for {getattr(model, 'key', 'model')}:{axis}",
+                        partial_summary=partial_summary,
+                        rgf_rows=rgf_rows,
+                        rgf_jobs=rgf_jobs,
+                    )
             _append_nanowire_benchmark_trace(
                 trace_path,
                 "rgf_case_done",
@@ -8551,6 +8624,16 @@ def _run_kwant_and_rgf_overlap(
         kwant_future = executor.submit(submit_kwant_reference, cancel_event=cancel_kwant)
         try:
             rgf_rows, rgf_jobs = run_rgf_axis()
+        except _PartialOverlapFailure as exc:
+            cancel_kwant.set()
+            with contextlib.suppress(CancelledError, RuntimeError):
+                kwant_future.result()
+            raise _KwantOverlapError(
+                str(exc),
+                rgf_rows=exc.rgf_rows,
+                rgf_jobs=exc.rgf_jobs,
+                partial_summary=exc.partial_summary,
+            ) from exc
         except Exception:
             cancel_kwant.set()
             with contextlib.suppress(CancelledError, RuntimeError):
@@ -8833,6 +8916,7 @@ def benchmark_transport(
             rgf_rows: list[dict[str, Any]] | None = None
             rgf_jobs: list[dict[str, Any]] | None = None
             kwant_launch_error: Exception | None = None
+            live_partial_summary: dict[str, Any] | None = None
             kwant_result = _load_complete_nanowire_kwant_reference(
                 kwant_reference_path,
                 spec=spec,
@@ -8951,6 +9035,7 @@ def benchmark_transport(
                         kwant_launch_error = exc
                         rgf_rows = exc.rgf_rows
                         rgf_jobs = exc.rgf_jobs
+                        live_partial_summary = exc.partial_summary
                 else:
                     try:
                         kwant_result, kwant_job = submit_kwant_nanowire_reference(
@@ -8974,6 +9059,11 @@ def benchmark_transport(
 
                 if kwant_launch_error is not None:
                     kwant_result = _load_nanowire_kwant_reference_checkpoint(kwant_reference_path)
+                    if kwant_result is None and live_partial_summary is not None and model.primary_for_rgf:
+                        kwant_result = _kwant_checkpoint_from_partial_summary(
+                            partial_summary=live_partial_summary,
+                            spec=spec,
+                        )
                     if kwant_result is None or not model.primary_for_rgf:
                         raise kwant_launch_error
                     kwant_job = {
@@ -9064,6 +9154,7 @@ def benchmark_transport(
                 partial_summary = _write_partial_nanowire_axis_artifacts(
                     axis_dir=axis_dir,
                     spec=spec,
+                    summary=live_partial_summary,
                 )
                 axis_summary["rgf_jobs"] = rgf_jobs
                 axis_summary["partial_overlap"] = {
