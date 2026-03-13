@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from wtec.transport.kwant_sigma_extract import extract_kwant_sigmas
 from wtec.wannier.model import WannierTBModel
 from wtec.wannier.parser import HoppingData, write_hr_dat
 
@@ -289,6 +290,104 @@ def test_rgf_native_runner_emits_progress_and_energy_for_full_finite(tmp_path: P
     assert any('"event":"native_point_done"' in line for line in progress_lines)
     assert any('"event":"native_phase"' in line for line in progress_lines)
     assert "[progress]" in proc.stdout
+
+
+@pytest.mark.skipif(
+    shutil.which("make") is None or (shutil.which("cc") is None and shutil.which("mpicc") is None),
+    reason="native RGF smoke test requires make and a C compiler",
+)
+def test_rgf_native_runner_matches_principal_layer_exact_sigma_for_full_finite(tmp_path: Path) -> None:
+    kwant = pytest.importorskip("kwant")
+
+    repo_root = Path(__file__).resolve().parents[1]
+    rgf_dir = repo_root / "wtec" / "ext" / "rgf"
+    subprocess.run(["make", "clean", "all"], cwd=rgf_dir, check=True)
+
+    hd = HoppingData(
+        num_wann=1,
+        r_vectors=np.array([[0, 0, 0], [1, 0, 0], [-1, 0, 0], [2, 0, 0], [-2, 0, 0]], dtype=int),
+        deg=np.array([1, 1, 1, 1, 1], dtype=int),
+        H_R=np.array(
+            [[[0.0 + 0.0j]], [[-1.0 + 0.0j]], [[-1.0 + 0.0j]], [[-0.4 + 0.0j]], [[-0.4 + 0.0j]]],
+            dtype=complex,
+        ),
+    )
+    hr_path = tmp_path / "toy_hr.dat"
+    write_hr_dat(hr_path, hd, header="toy full-finite exact sigma")
+    (tmp_path / "toy.win").write_text(
+        "\n".join(
+            [
+                "begin unit_cell_cart",
+                "ang",
+                "1.0 0.0 0.0",
+                "0.0 1.0 0.0",
+                "0.0 0.0 1.0",
+                "end unit_cell_cart",
+            ]
+        )
+        + "\n"
+    )
+
+    sigma_manifest = extract_kwant_sigmas(
+        hr_path=hr_path,
+        length_uc=6,
+        width_uc=1,
+        thickness_uc=1,
+        energy_ev=0.1,
+        eta_ev=1.0e-6,
+        out_dir=tmp_path / "sigma",
+        layout="full_finite_principal",
+    )
+    assert sigma_manifest["layout"] == "full_finite_principal"
+    assert sigma_manifest["principal_layer_width"] == 2
+    assert sigma_manifest["slice_widths"] == [2, 2, 2, 2]
+
+    payload = {
+        "hr_dat_path": "toy_hr.dat",
+        "win_path": "toy.win",
+        "queue": "local",
+        "thicknesses": [1],
+        "disorder_strengths": [0.0],
+        "n_ensemble": 1,
+        "energy": 0.1,
+        "eta": 1.0e-6,
+        "mfp_n_layers_z": 1,
+        "mfp_lengths": [],
+        "lead_axis": "x",
+        "thickness_axis": "z",
+        "n_layers_x": 6,
+        "n_layers_y": 1,
+        "transport_engine": "rgf",
+        "transport_rgf_mode": "full_finite",
+        "transport_rgf_periodic_axis": "y",
+        "sigma_left_path": str(Path("sigma") / "sigma_left.bin"),
+        "sigma_right_path": str(Path("sigma") / "sigma_right.bin"),
+    }
+    (tmp_path / "payload.json").write_text(json.dumps(payload, indent=2))
+
+    runner = rgf_dir / "build" / "wtec_rgf_runner"
+    subprocess.run([str(runner), "payload.json", "raw.json"], cwd=tmp_path, check=True)
+    raw = json.loads((tmp_path / "raw.json").read_text())["transport_results_raw"]
+
+    lat = kwant.lattice.chain(norbs=1)
+    syst = kwant.Builder()
+    for x in range(6):
+        syst[lat(x)] = 0.0
+    for x in range(5):
+        syst[lat(x), lat(x + 1)] = -1.0
+    for x in range(4):
+        syst[lat(x), lat(x + 2)] = -0.4
+    sym = kwant.TranslationalSymmetry((-1,))
+    lead = kwant.Builder(sym)
+    lead[lat(0)] = 0.0
+    lead[lat.neighbors()] = -1.0
+    lead[lat(0), lat(2)] = -0.4
+    syst.attach_lead(lead, add_cells=1)
+    syst.attach_lead(lead.reversed(), add_cells=1)
+    kwant_t = float(kwant.smatrix(syst.finalized(), 0.1).transmission(1, 0))
+
+    assert raw["mode"] == "full_finite"
+    assert raw["thickness_G"] == pytest.approx([kwant_t], rel=1.0e-5, abs=1.0e-5)
 
 
 @pytest.mark.skipif(

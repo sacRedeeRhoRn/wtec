@@ -836,6 +836,7 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
     assert meta["job_id"] == "1003"
     assert results["meta"]["transport_engine"] == "rgf"
     assert "wtec.transport.kwant_sigma_extract" in str(captured["script"])
+    assert "--layout full_finite_principal" in str(captured["script"])
     assert "--hr-path " in str(captured["script"])
     assert "_canonical_hr.dat" in str(captured["script"])
     assert "sigma_manifest.json" in captured["retrieve_patterns"]

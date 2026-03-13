@@ -1632,6 +1632,7 @@ class TopoSlabWorkflow:
                         f"--thickness-uc {int(thicknesses[0])} "
                         f"--energy-ev {float(payload['energy']):.16g} "
                         f"--eta-ev {float(payload['eta']):.16g} "
+                        "--layout full_finite_principal "
                         f"--out-dir {shlex.quote('.')}"
                     ),
                 )
