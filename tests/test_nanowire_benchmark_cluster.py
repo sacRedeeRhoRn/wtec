@@ -113,13 +113,13 @@ def test_submit_kwant_nanowire_reference_uses_conservative_multi_rank_layout(
     )
 
     script = str(seen["script"])
-    assert "#PBS -l select=1:ncpus=64:mpiprocs=4:ompthreads=16" in script
-    assert "#PBS -l walltime=09:00:00" in script
-    assert "export OMP_NUM_THREADS=16" in script
-    assert "export MKL_NUM_THREADS=16" in script
-    assert "export OPENBLAS_NUM_THREADS=16" in script
-    assert "export NUMEXPR_NUM_THREADS=16" in script
-    assert "mpirun -np 4 --bind-to none" in script
+    assert "#PBS -l select=1:ncpus=64:mpiprocs=16:ompthreads=4" in script
+    assert "#PBS -l walltime=03:00:00" in script
+    assert "export OMP_NUM_THREADS=4" in script
+    assert "export MKL_NUM_THREADS=4" in script
+    assert "export OPENBLAS_NUM_THREADS=4" in script
+    assert "export NUMEXPR_NUM_THREADS=4" in script
+    assert "mpirun -np 16 --bind-to none" in script
     assert seen["kwargs"]["live_retrieve_patterns"] == [
         "kwant_reference.json",
         "kwant_reference.rank*.jsonl",
@@ -328,7 +328,7 @@ def test_resolve_kwant_reference_walltime_scales_by_worker_waves() -> None:
         task_count=35,
         n_nodes=1,
     )
-    assert walltime == "09:00:00"
+    assert walltime == "03:00:00"
 
 
 def test_resolve_kwant_reference_walltime_honors_env_override(monkeypatch) -> None:

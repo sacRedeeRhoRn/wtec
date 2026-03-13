@@ -23,7 +23,7 @@ from wtec.workflow.orchestrator import TopoSlabWorkflow
 
 
 def _kwant_worker_layout(*, total_cores: int, task_count: int, n_nodes: int) -> tuple[int, int]:
-    """Choose a conservative MPI/OMP layout for independent Kwant reference points."""
+    """Choose an MPI/OMP layout that favors task-level parallelism for Kwant points."""
     max_ranks = max(1, min(int(total_cores), int(task_count)))
     override_raw = os.environ.get("TOPOSLAB_KWANT_BENCH_MPI_RANKS", "").strip()
     if override_raw:
@@ -33,9 +33,12 @@ def _kwant_worker_layout(*, total_cores: int, task_count: int, n_nodes: int) -> 
             override = 0
         mpi_np = max(1, min(override, max_ranks)) if override > 0 else 1
     else:
-        # Use a few worker ranks to exploit task-level parallelism without
-        # flooding a node with too many concurrent MUMPS factorizations.
-        mpi_np = max(1, min(max_ranks, max(1, int(total_cores) // 16), 4))
+        # These benchmark points are independent, and large per-rank thread counts
+        # leave the node underutilized when the Kwant/MUMPS stack does not scale
+        # proportionally with OMP threads. Favor more concurrent reference points
+        # while keeping a modest per-rank thread budget.
+        target_threads = 4
+        mpi_np = max(1, min(max_ranks, max(1, int(total_cores) // target_threads), 16))
     if int(n_nodes) > 1 and mpi_np % int(n_nodes) != 0:
         mpi_np = max(int(n_nodes), (mpi_np // int(n_nodes)) * int(n_nodes))
         mpi_np = min(mpi_np, max_ranks)
