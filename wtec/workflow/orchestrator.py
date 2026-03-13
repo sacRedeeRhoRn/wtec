@@ -1658,8 +1658,12 @@ class TopoSlabWorkflow:
                     threads=sigma_threads,
                     full_node_threading=bool(sigma_threads > 1),
                 )
+                commands.append('echo "[wtec][runtime] sigma_extract_start $(date -Is)"')
                 commands.append(sigma_cmd)
+                commands.append('echo "[wtec][runtime] sigma_extract_done $(date -Is)"')
+            commands.append('echo "[wtec][runtime] rgf_runner_start $(date -Is)"')
             commands.append(cmd)
+            commands.append('echo "[wtec][runtime] rgf_runner_done $(date -Is)"')
             job_name = f"rgf_{str(label)[:5]}_{run_name}"[:15]
             stdout_log_name = self._attempt_artifact_name(f"{job_name}.log", attempt_tag)
             script = generate_script(

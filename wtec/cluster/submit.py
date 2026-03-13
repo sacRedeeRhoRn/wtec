@@ -8,7 +8,7 @@ import re
 import shlex
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 
 JobStatus = Literal["QUEUED", "RUNNING", "COMPLETED", "FAILED", "UNKNOWN"]
@@ -481,6 +481,7 @@ class JobManager:
         live_retrieve_local_dir: str | Path | None = None,
         live_retrieve_patterns: list[str] | None = None,
         live_retrieve_interval_seconds: int = 0,
+        live_retrieve_hook: Callable[[], None] | None = None,
         stale_log_seconds: int = 300,
         stream_from_start: bool = False,
         cancel_event=None,
@@ -551,6 +552,8 @@ class JobManager:
                         live_retrieve_local_dir,
                         live_retrieve_patterns,
                     )
+                    if live_retrieve_hook is not None:
+                        live_retrieve_hook()
                 except Exception:
                     pass
                 last_live_retrieve_elapsed = elapsed
@@ -623,6 +626,7 @@ class JobManager:
         live_files: list[str] | None = None,
         live_retrieve_patterns: list[str] | None = None,
         live_retrieve_interval_seconds: int = 0,
+        live_retrieve_hook: Callable[[], None] | None = None,
         stale_log_seconds: int = 300,
         retrieve_on_failure: bool = False,
         stream_from_start: bool = False,
@@ -655,6 +659,7 @@ class JobManager:
             live_retrieve_local_dir=local_dir,
             live_retrieve_patterns=live_retrieve_patterns,
             live_retrieve_interval_seconds=live_retrieve_interval_seconds,
+            live_retrieve_hook=live_retrieve_hook,
             stale_log_seconds=stale_log_seconds,
             stream_from_start=stream_from_start,
             cancel_event=cancel_event,

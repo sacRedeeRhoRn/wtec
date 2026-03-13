@@ -113,6 +113,16 @@ def submit_kwant_nanowire_reference(
     script_path = benchmark_path / "kwant_reference.pbs"
     worker_zip = TopoSlabWorkflow._worker_source_zip(benchmark_path)
 
+    def _merge_local_checkpoint() -> None:
+        if not result_path.exists() and not list(benchmark_path.glob(f"{result_path.stem}.rank*.jsonl")):
+            return
+        merged = kwant_reference_checkpoint_payload(
+            result_path,
+            thicknesses=spec.thicknesses_uc,
+            energies_rel_fermi_ev=spec.energies_ev,
+        )
+        result_path.write_text(json.dumps(merged, indent=2))
+
     payload = {
         "mp_id": str(spec.mp_id),
         "material": str(spec.material),
@@ -216,6 +226,7 @@ def submit_kwant_nanowire_reference(
                         f"{result_path.stem}.rank*.jsonl",
                     ],
                     live_retrieve_interval_seconds=int(max(5, poll_interval)),
+                    live_retrieve_hook=_merge_local_checkpoint,
                     stale_log_seconds=int(stale_log_seconds),
                     retrieve_on_failure=True,
                     stream_from_start=True,

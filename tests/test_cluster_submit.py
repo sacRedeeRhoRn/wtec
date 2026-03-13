@@ -16,6 +16,7 @@ class _DummySSH:
 def test_submit_and_wait_retrieves_live_artifacts_before_terminal(tmp_path, monkeypatch) -> None:
     jm = JobManager(_DummySSH())
     retrieve_calls: list[tuple[str, str, tuple[str, ...]]] = []
+    hook_calls: list[str] = []
     states = iter(
         [
             {
@@ -60,6 +61,7 @@ def test_submit_and_wait_retrieves_live_artifacts_before_terminal(tmp_path, monk
         retrieve_patterns=["result.json"],
         live_retrieve_patterns=["progress.jsonl", "partial.rank0.jsonl"],
         live_retrieve_interval_seconds=5,
+        live_retrieve_hook=lambda: hook_calls.append("live"),
         script_name="job.pbs",
         poll_interval=5,
         verbose=False,
@@ -78,3 +80,4 @@ def test_submit_and_wait_retrieves_live_artifacts_before_terminal(tmp_path, monk
             ("result.json",),
         ),
     ]
+    assert hook_calls == ["live"]

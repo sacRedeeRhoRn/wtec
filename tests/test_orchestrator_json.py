@@ -887,6 +887,10 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
         "export PRTE_MCA_hwloc_base_binding_policy=none; mpirun -np 1 "
         "env PYTHONPATH=$PWD/wtec_src.zip:$PYTHONPATH python3 -m wtec.transport.kwant_sigma_extract"
     ) in str(captured["script"])
+    assert 'echo "[wtec][runtime] sigma_extract_start $(date -Is)"' in str(captured["script"])
+    assert 'echo "[wtec][runtime] sigma_extract_done $(date -Is)"' in str(captured["script"])
+    assert 'echo "[wtec][runtime] rgf_runner_start $(date -Is)"' in str(captured["script"])
+    assert 'echo "[wtec][runtime] rgf_runner_done $(date -Is)"' in str(captured["script"])
     assert "--layout full_finite_principal" in str(captured["script"])
     assert "--hr-path " in str(captured["script"])
     assert "_canonical_hr.dat" in str(captured["script"])
