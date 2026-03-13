@@ -15,6 +15,17 @@ class _FakeSmatrix:
         return float(self._value)
 
 
+class _NoopHeartbeat:
+    def __init__(self, **_kwargs) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
 def _payload() -> dict:
     return {
         "mp_id": "mp-test",
@@ -162,3 +173,43 @@ def test_run_payload_emits_heartbeat_during_long_kwant_point(
     captured = capfd.readouterr().out
     assert result["status"] == "ok"
     assert "[kwant-bench][rank=0] heartbeat thickness_uc=1 energy_abs_ev=0.800000" in captured
+
+
+def test_run_local_tasks_appends_rank_shards_per_completion(tmp_path: Path, monkeypatch) -> None:
+    checkpoint = tmp_path / "kwant_reference.json"
+    build_calls: list[int] = []
+    transport_calls: list[float] = []
+    callback_rows: list[dict] = []
+
+    def _fake_build(_h_r, *, length_uc: int, width_uc: int, thickness_uc: int):
+        build_calls.append(int(thickness_uc))
+        return object(), 10 + int(thickness_uc)
+
+    def _fake_transport(_fsyst, *, energy_abs: float):
+        transport_calls.append(float(energy_abs))
+        return _FakeSmatrix(float(energy_abs))
+
+    monkeypatch.setattr(knb, "_build_system_from_hr", _fake_build)
+    monkeypatch.setattr(knb, "_transport_smatrix", _fake_transport)
+    monkeypatch.setattr(knb, "_KwantHeartbeat", _NoopHeartbeat)
+
+    results, fsys_cache, fatal_error = knb._run_local_tasks(
+        local_tasks=[(1, -0.2, 0.8), (1, 0.0, 1.0)],
+        rank=3,
+        h_r={(0, 0, 0): 0},
+        length_uc=24,
+        width_uc=13,
+        checkpoint_path=checkpoint,
+        model_key="model_b",
+        model_label="Model B",
+        row_callback=callback_rows.append,
+    )
+
+    shard_lines = (tmp_path / "kwant_reference.rank3.jsonl").read_text().splitlines()
+    assert fatal_error is None
+    assert build_calls == [1]
+    assert transport_calls == [0.8, 1.0]
+    assert list(fsys_cache) == [1]
+    assert [row["energy_rel_fermi_ev"] for row in results] == [-0.2, 0.0]
+    assert [row["energy_rel_fermi_ev"] for row in callback_rows] == [-0.2, 0.0]
+    assert [json.loads(line)["energy_rel_fermi_ev"] for line in shard_lines] == [-0.2, 0.0]

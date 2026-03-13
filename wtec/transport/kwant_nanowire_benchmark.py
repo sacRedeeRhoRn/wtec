@@ -8,7 +8,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -443,6 +443,69 @@ def _build_result_payload(
     return out
 
 
+def _run_local_tasks(
+    *,
+    local_tasks: list[tuple[int, float, float]],
+    rank: int,
+    h_r: dict[tuple[int, int, int], np.ndarray],
+    length_uc: int,
+    width_uc: int,
+    checkpoint_path: Path | None,
+    model_key: str,
+    model_label: str,
+    row_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[dict[str, Any]], dict[int, tuple[Any, int]], str | None]:
+    local_results: list[dict[str, Any]] = []
+    fsys_cache: dict[int, tuple[Any, int]] = {}
+    fatal_error: str | None = None
+
+    for thickness_uc, de, eabs in local_tasks:
+        try:
+            print(
+                f"[kwant-bench][rank={rank}] start thickness_uc={thickness_uc} energy_abs_ev={eabs:.6f}",
+                flush=True,
+            )
+            if thickness_uc not in fsys_cache:
+                fsys_cache[thickness_uc] = _build_system_from_hr(
+                    h_r,
+                    length_uc=length_uc,
+                    width_uc=width_uc,
+                    thickness_uc=thickness_uc,
+                )
+            fsyst, add_cells = fsys_cache[thickness_uc]
+            with _KwantHeartbeat(rank=rank, thickness_uc=thickness_uc, energy_abs_ev=eabs):
+                smat = _transport_smatrix(fsyst, energy_abs=float(eabs))
+            t10 = float(smat.transmission(1, 0))
+            print(
+                f"[kwant-bench][rank={rank}] done thickness_uc={thickness_uc} "
+                f"energy_abs_ev={eabs:.6f} transmission={t10:.12f}",
+                flush=True,
+            )
+            row = {
+                "thickness_uc": int(thickness_uc),
+                "energy_rel_fermi_ev": float(de),
+                "energy_abs_ev": float(eabs),
+                "transmission_e2_over_h": t10,
+                "add_cells": int(add_cells),
+                "width_uc": int(width_uc),
+                "model_key": model_key,
+                "model_label": model_label,
+                "rank": int(rank),
+            }
+            _append_checkpoint_shard(checkpoint_path, rank=rank, row=row)
+            local_results.append(row)
+            if row_callback is not None:
+                row_callback(row)
+        except Exception as exc:  # pragma: no cover - runtime dependent
+            fatal_error = (
+                f"rank={rank}, thickness_uc={thickness_uc}, energy_abs_ev={eabs}, "
+                f"error={type(exc).__name__}: {exc}"
+            )
+            break
+
+    return local_results, fsys_cache, fatal_error
+
+
 def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None) -> dict[str, Any]:
     comm, rank, size = _mpi_context()
     solver = _solver_status()
@@ -475,10 +538,6 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
     ]
 
     local = pending_tasks[rank::size]
-    fsys_cache: dict[int, tuple[Any, int]] = {}
-    max_rounds = len(local)
-    if comm is not None:
-        max_rounds = max(int(v) for v in comm.allgather(len(local)))
 
     def _partial_validation() -> dict[str, Any]:
         return {
@@ -543,91 +602,63 @@ def run_payload(payload: dict[str, Any], *, checkpoint_path: Path | None = None)
             )
 
     merged_by_key = dict(existing_results_by_key) if rank == 0 else {}
-    fatal_error: str | None = None
 
-    for round_idx in range(int(max_rounds)):
-        round_result: dict[str, Any] | None = None
-        round_error: str | None = None
-        if round_idx < len(local):
-            thickness_uc, de, eabs = local[round_idx]
-            try:
-                print(
-                    f"[kwant-bench][rank={rank}] start thickness_uc={thickness_uc} energy_abs_ev={eabs:.6f}",
-                    flush=True,
-                )
-                if thickness_uc not in fsys_cache:
-                    fsys_cache[thickness_uc] = _build_system_from_hr(
-                        h_r,
-                        length_uc=length_uc,
-                        width_uc=width_uc,
-                        thickness_uc=thickness_uc,
-                    )
-                fsyst, add_cells = fsys_cache[thickness_uc]
-                with _KwantHeartbeat(rank=rank, thickness_uc=thickness_uc, energy_abs_ev=eabs):
-                    smat = _transport_smatrix(fsyst, energy_abs=float(eabs))
-                t10 = float(smat.transmission(1, 0))
-                print(
-                    f"[kwant-bench][rank={rank}] done thickness_uc={thickness_uc} "
-                    f"energy_abs_ev={eabs:.6f} transmission={t10:.12f}",
-                    flush=True,
-                )
-                round_result = {
-                    "thickness_uc": int(thickness_uc),
-                    "energy_rel_fermi_ev": float(de),
-                    "energy_abs_ev": float(eabs),
-                    "transmission_e2_over_h": t10,
-                    "add_cells": int(add_cells),
-                    "width_uc": int(width_uc),
-                    "model_key": model_key,
-                    "model_label": model_label,
-                    "rank": int(rank),
-                }
-                _append_checkpoint_shard(checkpoint_path, rank=rank, row=round_result)
-            except Exception as exc:  # pragma: no cover - runtime dependent
-                round_error = (
-                    f"rank={rank}, thickness_uc={thickness_uc}, energy_abs_ev={eabs}, "
-                    f"error={type(exc).__name__}: {exc}"
-                )
-
-        if comm is not None:
-            gathered_results = comm.gather(round_result, root=0)
-            gathered_errors = comm.gather(round_error, root=0)
-        else:
-            gathered_results = [round_result]
-            gathered_errors = [round_error]
-
-        stop = False
-        if rank == 0:
-            for row in gathered_results:
-                if not isinstance(row, dict):
-                    continue
-                merged_by_key[
-                    _task_key(
-                        int(row["thickness_uc"]),
-                        float(row["energy_rel_fermi_ev"]),
-                    )
-                ] = row
-            merged_rows = sorted(
-                merged_by_key.values(),
-                key=lambda row: (int(row["thickness_uc"]), float(row["energy_rel_fermi_ev"])),
+    def _remember_local_row(row: dict[str, Any]) -> None:
+        merged_by_key[
+            _task_key(
+                int(row["thickness_uc"]),
+                float(row["energy_rel_fermi_ev"]),
             )
-            _write_checkpoint(merged_rows, status="partial")
-            errors = [err for err in gathered_errors if isinstance(err, str) and err]
-            if errors:
-                fatal_error = "MPI worker failure(s): " + " | ".join(errors)
-                stop = True
-        if comm is not None:
-            stop = bool(comm.bcast(bool(stop), root=0))
-        if stop:
-            break
+        ] = row
+        merged_rows = sorted(
+            merged_by_key.values(),
+            key=lambda item: (int(item["thickness_uc"]), float(item["energy_rel_fermi_ev"])),
+        )
+        _write_checkpoint(merged_rows, status="partial")
+
+    local_results, local_cache, local_error = _run_local_tasks(
+        local_tasks=local,
+        rank=rank,
+        h_r=h_r,
+        length_uc=int(length_uc),
+        width_uc=int(width_uc),
+        checkpoint_path=checkpoint_path,
+        model_key=model_key,
+        model_label=model_label,
+        row_callback=_remember_local_row if rank == 0 else None,
+    )
+
+    if comm is not None:
+        gathered_results = comm.gather(local_results, root=0)
+        gathered_errors = comm.gather(local_error, root=0)
+    else:
+        gathered_results = [local_results]
+        gathered_errors = [local_error]
 
     if rank != 0:
         return {}
 
+    fsys_cache: dict[int, tuple[Any, int]] = dict(local_cache)
+    fatal_error: str | None = None
+    for rows in gathered_results:
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            merged_by_key[
+                _task_key(
+                    int(row["thickness_uc"]),
+                    float(row["energy_rel_fermi_ev"]),
+                )
+            ] = row
     merged = sorted(
         merged_by_key.values(),
         key=lambda row: (int(row["thickness_uc"]), float(row["energy_rel_fermi_ev"])),
     )
+    errors = [err for err in gathered_errors if isinstance(err, str) and err]
+    if errors:
+        fatal_error = "MPI worker failure(s): " + " | ".join(errors)
     if fatal_error is not None:
         return _write_checkpoint(merged, status="partial", fatal_error=fatal_error)
 
