@@ -1953,6 +1953,36 @@ class TopoSlabWorkflow:
                 return legacy
         return labeled
 
+    def _required_cached_rgf_sigma_source(self) -> str | None:
+        if str(self.cfg.get("transport_engine", self._transport_engine())).strip().lower() != "rgf":
+            return None
+        if str(self.cfg.get("transport_rgf_mode", "")).strip().lower() != "full_finite":
+            return None
+        sigma_backend = (
+            str(self.cfg.get("transport_rgf_full_finite_sigma_backend", "native")).strip().lower()
+            or "native"
+        )
+        sigma_source = (
+            str(self.cfg.get("_transport_rgf_internal_sigma_mode", sigma_backend)).strip().lower()
+            or sigma_backend
+        )
+        return sigma_source if sigma_source == "kwant_exact" else None
+
+    @staticmethod
+    def _transport_result_sigma_source(payload: dict[str, Any]) -> str | None:
+        runtime_cert = payload.get("runtime_cert", {})
+        if isinstance(runtime_cert, dict):
+            source = str(runtime_cert.get("full_finite_sigma_source", "")).strip().lower()
+            if source:
+                return source
+        results = payload.get("transport_results", {})
+        meta = results.get("meta", {}) if isinstance(results, dict) else {}
+        if isinstance(meta, dict):
+            source = str(meta.get("rgf_full_finite_sigma_source", "")).strip().lower()
+            if source:
+                return source
+        return None
+
     def _load_cached_transport_results(self, *, label: str = "primary") -> dict | None:
         run_profile = str(self.cfg.get("run_profile", "strict")).strip().lower() or "strict"
         default_reuse = run_profile == "smoke"
@@ -1966,6 +1996,11 @@ class TopoSlabWorkflow:
             res = payload.get("transport_results", {})
             if not isinstance(res, dict):
                 return None
+            required_sigma_source = self._required_cached_rgf_sigma_source()
+            if required_sigma_source is not None:
+                cached_sigma_source = self._transport_result_sigma_source(payload)
+                if cached_sigma_source != required_sigma_source:
+                    return None
             return self._normalize_transport_results(res)
         except Exception:
             return None

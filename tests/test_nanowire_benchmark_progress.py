@@ -55,6 +55,9 @@ def test_scan_partial_rgf_results_from_progress_only(tmp_path: Path) -> None:
             "disorder_strengths": [0.0],
             "mfp_lengths": [],
             "energy": 1.4,
+            "transport_rgf_mode": "full_finite",
+            "sigma_left_path": "sigma_left.bin",
+            "sigma_right_path": "sigma_right.bin",
         },
     )
     (transport_dir / "transport_progress_primary_001.jsonl").write_text(
@@ -87,6 +90,9 @@ def test_scan_partial_rgf_results_prefers_transport_result_over_progress(tmp_pat
             "disorder_strengths": [0.0],
             "mfp_lengths": [],
             "energy": 1.4,
+            "transport_rgf_mode": "full_finite",
+            "sigma_left_path": "sigma_left.bin",
+            "sigma_right_path": "sigma_right.bin",
         },
     )
     (transport_dir / "transport_progress_primary_001.jsonl").write_text(
@@ -96,7 +102,13 @@ def test_scan_partial_rgf_results_prefers_transport_result_over_progress(tmp_pat
     _write_json(
         transport_dir / "transport_result.json",
         {
+            "runtime_cert": {
+                "full_finite_sigma_source": "kwant_exact",
+            },
             "transport_results": {
+                "meta": {
+                    "rgf_full_finite_sigma_source": "kwant_exact",
+                },
                 "thickness_scan": {
                     "0.0": {
                         "G_mean": [0.76],
@@ -111,6 +123,43 @@ def test_scan_partial_rgf_results_prefers_transport_result_over_progress(tmp_pat
     row = out["rows"][0]
     assert row["transmission_e2_over_h"] == 0.76
     assert row["source_kind"] == "rgf_transport_result"
+
+
+def test_scan_partial_rgf_results_skips_full_finite_rows_without_exact_sigma_contract(tmp_path: Path) -> None:
+    transport_dir = tmp_path / "rgf" / "d05_em0p1" / "transport" / "primary"
+    payload_path = transport_dir / "transport_payload_primary_001.json"
+    _write_json(
+        payload_path,
+        {
+            "thicknesses": [5],
+            "disorder_strengths": [0.0],
+            "mfp_lengths": [],
+            "energy": 1.4,
+            "transport_rgf_mode": "full_finite",
+        },
+    )
+    _write_json(
+        transport_dir / "transport_result.json",
+        {
+            "transport_results": {
+                "meta": {
+                    "rgf_full_finite_sigma_backend": "native",
+                },
+                "thickness_scan": {
+                    "0.0": {
+                        "G_mean": [0.76],
+                    }
+                },
+            },
+            "runtime_cert": {
+                "mode": "full_finite",
+            },
+        },
+    )
+
+    out = scan_partial_rgf_results(tmp_path / "rgf", fermi_ev=1.5)
+    assert out["row_count"] == 0
+    assert str(payload_path) in out["skipped_payloads"]
 
 
 def test_compare_partial_benchmark_progress_uses_overlap_only(tmp_path: Path) -> None:
@@ -192,12 +241,21 @@ def test_compare_partial_benchmark_progress_skips_incomplete_rgf_progress(tmp_pa
             "disorder_strengths": [0.0],
             "mfp_lengths": [],
             "energy": 1.4,
+            "transport_rgf_mode": "full_finite",
+            "sigma_left_path": "sigma_left.bin",
+            "sigma_right_path": "sigma_right.bin",
         },
     )
     _write_json(
         complete_dir / "transport_result.json",
         {
+            "runtime_cert": {
+                "full_finite_sigma_source": "kwant_exact",
+            },
             "transport_results": {
+                "meta": {
+                    "rgf_full_finite_sigma_source": "kwant_exact",
+                },
                 "thickness_scan": {
                     "0.0": {
                         "G_mean": [0.74],
@@ -215,6 +273,9 @@ def test_compare_partial_benchmark_progress_skips_incomplete_rgf_progress(tmp_pa
             "disorder_strengths": [0.0],
             "mfp_lengths": [],
             "energy": 1.5,
+            "transport_rgf_mode": "full_finite",
+            "sigma_left_path": "sigma_left.bin",
+            "sigma_right_path": "sigma_right.bin",
         },
     )
     (incomplete_dir / "transport_progress_primary_001.jsonl").write_text(

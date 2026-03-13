@@ -327,6 +327,42 @@ def test_stage_transport_rgf_qsub_reuses_cached_result_for_requested_label(
     assert meta["result_file"] == str(result_path)
 
 
+def test_load_cached_transport_results_rejects_full_finite_cache_without_exact_sigma(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "run"
+    result_path = run_dir / "transport" / "primary" / "transport_result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "transport_results": {
+                    "meta": {
+                        "transport_engine": "rgf",
+                        "rgf_full_finite_sigma_backend": "native",
+                    },
+                    "thickness_scan": {"0.0": {"thicknesses": [1], "values": [12.5]}},
+                },
+                "runtime_cert": {"mode": "full_finite"},
+            }
+        )
+    )
+    cfg = {
+        "name": "demo",
+        "run_dir": str(run_dir),
+        "transport_engine": "rgf",
+        "transport_backend": "qsub",
+        "transport_strict_qsub": True,
+        "transport_rgf_mode": "full_finite",
+        "transport_rgf_full_finite_sigma_backend": "native",
+        "_transport_rgf_internal_sigma_mode": "kwant_exact",
+        "reuse_transport_results": True,
+    }
+    wf = TopoSlabWorkflow.from_config(cfg)
+
+    assert wf._load_cached_transport_results(label="primary") is None
+
+
 class _SSH:
     def __enter__(self):
         return self

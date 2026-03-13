@@ -273,8 +273,38 @@ def _normalize_rgf_payload_row(
         "thickness_uc": int(thicknesses[0]),
         "energy_abs_ev": float(energy_abs_ev),
         "energy_rel_fermi_ev": (None if energy_rel is None else _canon_float(energy_rel)),
+        "payload": payload,
+        "payload_path": payload_path,
         "transport_dir": payload_path.parent,
     }
+
+
+def _payload_requires_exact_sigma(payload: dict[str, Any]) -> bool:
+    return str(payload.get("transport_rgf_mode", "")).strip().lower() == "full_finite"
+
+
+def _payload_has_exact_sigma_staging(payload: dict[str, Any]) -> bool:
+    return bool(str(payload.get("sigma_left_path", "")).strip()) and bool(
+        str(payload.get("sigma_right_path", "")).strip()
+    )
+
+
+def _transport_result_sigma_source(result_path: Path) -> str | None:
+    payload = _json_load(result_path)
+    if not isinstance(payload, dict):
+        return None
+    runtime_cert = payload.get("runtime_cert", {})
+    if isinstance(runtime_cert, dict):
+        source = str(runtime_cert.get("full_finite_sigma_source", "")).strip().lower()
+        if source:
+            return source
+    results = payload.get("transport_results", {})
+    meta = results.get("meta", {}) if isinstance(results, dict) else {}
+    if isinstance(meta, dict):
+        source = str(meta.get("rgf_full_finite_sigma_source", "")).strip().lower()
+        if source:
+            return source
+    return None
 
 
 def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = None) -> dict[str, Any]:
@@ -292,7 +322,9 @@ def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = N
         thickness_uc = int(meta["thickness_uc"])
         energy_abs_ev = float(meta["energy_abs_ev"])
         energy_rel = meta.get("energy_rel_fermi_ev")
+        payload = meta.get("payload", {})
         transport_dir = Path(meta["transport_dir"])
+        requires_exact_sigma = isinstance(payload, dict) and _payload_requires_exact_sigma(payload)
 
         result_path = transport_dir / "transport_result.json"
         raw_paths = sorted(
@@ -311,14 +343,23 @@ def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = N
         source_path: Path | None = None
 
         if result_path.exists():
+            if requires_exact_sigma and _transport_result_sigma_source(result_path) != "kwant_exact":
+                skipped.append(str(payload_path))
+                continue
             transmission = _extract_rgf_from_transport_result(result_path)
             source_kind = "rgf_transport_result"
             source_path = result_path
         elif raw_paths:
+            if requires_exact_sigma and not _payload_has_exact_sigma_staging(payload):
+                skipped.append(str(payload_path))
+                continue
             transmission = _extract_rgf_from_raw_result(raw_paths[0])
             source_kind = "rgf_raw_result"
             source_path = raw_paths[0]
         elif progress_paths:
+            if requires_exact_sigma and not _payload_has_exact_sigma_staging(payload):
+                skipped.append(str(payload_path))
+                continue
             try:
                 transmission = _extract_rgf_from_progress(progress_paths[0])
             except RuntimeError:
