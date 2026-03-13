@@ -8342,6 +8342,52 @@ def _load_complete_nanowire_kwant_reference(
     return result
 
 
+def _load_nanowire_kwant_reference_checkpoint(result_path: Path) -> dict[str, Any] | None:
+    if not result_path.exists():
+        return None
+    try:
+        result = json.loads(result_path.read_text())
+    except Exception:
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _write_partial_nanowire_axis_artifacts(
+    *,
+    axis_dir: Path,
+    spec: Any,
+) -> dict[str, Any]:
+    from wtec.transport.nanowire_benchmark_progress import (
+        compare_partial_benchmark_progress,
+        render_partial_comparison_markdown,
+    )
+
+    summary = compare_partial_benchmark_progress(
+        kwant_dir=axis_dir / "kwant",
+        rgf_root=axis_dir / "rgf",
+        spec=spec,
+    )
+    (axis_dir / "comparison_partial.json").write_text(json.dumps(summary, indent=2))
+    (axis_dir / "comparison_partial.md").write_text(
+        render_partial_comparison_markdown(summary),
+        encoding="utf-8",
+    )
+    return summary
+
+
+class _KwantOverlapError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        rgf_rows: list[dict[str, Any]],
+        rgf_jobs: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(message)
+        self.rgf_rows = list(rgf_rows)
+        self.rgf_jobs = list(rgf_jobs)
+
+
 def _run_rgf_benchmark_axis(
     *,
     source_cfg: dict[str, Any],
@@ -8480,7 +8526,14 @@ def _run_kwant_and_rgf_overlap(
             with contextlib.suppress(CancelledError, RuntimeError):
                 kwant_future.result()
             raise
-        kwant_result, kwant_job = kwant_future.result()
+        try:
+            kwant_result, kwant_job = kwant_future.result()
+        except RuntimeError as exc:
+            raise _KwantOverlapError(
+                str(exc),
+                rgf_rows=rgf_rows,
+                rgf_jobs=rgf_jobs,
+            ) from exc
     return kwant_result, kwant_job, rgf_rows, rgf_jobs
 
 
@@ -8557,6 +8610,7 @@ def benchmark_transport(
     from wtec.transport.nanowire_benchmark_cluster import (
         submit_kwant_nanowire_reference,
     )
+    from wtec.transport.kwant_nanowire_benchmark import kwant_reference_is_complete
     from wtec.wannier.parser import read_hr_dat
     from wtec.rgf import effective_principal_layer_width
     from wtec.workflow.orchestrator import TopoSlabWorkflow
@@ -8748,6 +8802,7 @@ def benchmark_transport(
             kwant_reference_path = kwant_benchmark_dir / "kwant_reference.json"
             rgf_rows: list[dict[str, Any]] | None = None
             rgf_jobs: list[dict[str, Any]] | None = None
+            kwant_launch_error: Exception | None = None
             kwant_result = _load_complete_nanowire_kwant_reference(
                 kwant_reference_path,
                 spec=spec,
@@ -8775,8 +8830,47 @@ def benchmark_transport(
                             fg="cyan",
                         )
                     )
-                    kwant_result, kwant_job, rgf_rows, rgf_jobs = _run_kwant_and_rgf_overlap(
-                        submit_kwant_reference=lambda cancel_event=None: submit_kwant_nanowire_reference(
+                    try:
+                        kwant_result, kwant_job, rgf_rows, rgf_jobs = _run_kwant_and_rgf_overlap(
+                            submit_kwant_reference=lambda cancel_event=None: submit_kwant_nanowire_reference(
+                                canonical_input=canonical,
+                                benchmark_dir=kwant_benchmark_dir,
+                                spec=spec,
+                                model_key=model.key,
+                                model_label=model.label,
+                                fermi_ev=fermi_ev_f,
+                                length_uc=length_uc,
+                                queue_override=queue,
+                                n_nodes=int(transport_nodes),
+                                walltime=walltime,
+                                python_executable=source_python,
+                                live_log=False,
+                                poll_interval=log_poll_interval,
+                                stale_log_seconds=stale_log_seconds,
+                                cancel_event=cancel_event,
+                            ),
+                            run_rgf_axis=lambda: _run_rgf_benchmark_axis(
+                                source_cfg=source_cfg,
+                                axis_dir=axis_dir,
+                                canonical=canonical,
+                                model=model,
+                                axis=axis,
+                                spec=spec,
+                                fermi_ev_f=fermi_ev_f,
+                                length_uc=length_uc,
+                                transport_nodes=int(transport_nodes),
+                                live_log=live_log,
+                                log_poll_interval=log_poll_interval,
+                                stale_log_seconds=stale_log_seconds,
+                            ),
+                        )
+                    except _KwantOverlapError as exc:
+                        kwant_launch_error = exc
+                        rgf_rows = exc.rgf_rows
+                        rgf_jobs = exc.rgf_jobs
+                else:
+                    try:
+                        kwant_result, kwant_job = submit_kwant_nanowire_reference(
                             canonical_input=canonical,
                             benchmark_dir=kwant_benchmark_dir,
                             spec=spec,
@@ -8788,43 +8882,37 @@ def benchmark_transport(
                             n_nodes=int(transport_nodes),
                             walltime=walltime,
                             python_executable=source_python,
-                            live_log=False,
+                            live_log=live_log,
                             poll_interval=log_poll_interval,
                             stale_log_seconds=stale_log_seconds,
-                            cancel_event=cancel_event,
-                        ),
-                        run_rgf_axis=lambda: _run_rgf_benchmark_axis(
-                            source_cfg=source_cfg,
-                            axis_dir=axis_dir,
-                            canonical=canonical,
-                            model=model,
-                            axis=axis,
-                            spec=spec,
-                            fermi_ev_f=fermi_ev_f,
-                            length_uc=length_uc,
-                            transport_nodes=int(transport_nodes),
-                            live_log=live_log,
-                            log_poll_interval=log_poll_interval,
-                            stale_log_seconds=stale_log_seconds,
-                        ),
+                        )
+                    except RuntimeError as exc:
+                        kwant_launch_error = exc
+
+                if kwant_launch_error is not None:
+                    kwant_result = _load_nanowire_kwant_reference_checkpoint(kwant_reference_path)
+                    if kwant_result is None or not model.primary_for_rgf:
+                        raise kwant_launch_error
+                    kwant_job = {
+                        "status": "partial",
+                        "path": str(kwant_reference_path),
+                        "error": str(kwant_launch_error),
+                    }
+                    click.echo(
+                        click.style(
+                            f"[benchmark] model={model.key} axis={axis}: using partial Kwant checkpoint {kwant_reference_path}",
+                            fg="yellow",
+                        )
                     )
-                else:
-                    kwant_result, kwant_job = submit_kwant_nanowire_reference(
-                        canonical_input=canonical,
-                        benchmark_dir=kwant_benchmark_dir,
-                        spec=spec,
-                        model_key=model.key,
-                        model_label=model.label,
-                        fermi_ev=fermi_ev_f,
-                        length_uc=length_uc,
-                        queue_override=queue,
-                        n_nodes=int(transport_nodes),
-                        walltime=walltime,
-                        python_executable=source_python,
-                        live_log=live_log,
-                        poll_interval=log_poll_interval,
-                        stale_log_seconds=stale_log_seconds,
-                    )
+
+            kwant_complete = bool(
+                kwant_result
+                and kwant_reference_is_complete(
+                    kwant_result,
+                    thicknesses=[int(v) for v in spec.thicknesses_uc],
+                    energies_rel_fermi_ev=[float(v) for v in spec.energies_ev],
+                )
+            )
 
             kwant_validation = (
                 kwant_result.get("validation", {})
@@ -8857,9 +8945,55 @@ def benchmark_transport(
                 "fixed_width_uc": int(spec.fixed_width_uc),
                 "principal_layer_width": int(p_eff),
                 "kwant_job": kwant_job,
+                "kwant_complete": bool(kwant_complete),
                 "kwant_validation": kwant_validation,
-                "kwant_fit_status": str(kwant_fit.get("status", "")),
+                "kwant_fit_status": str(kwant_fit.get("status", "")) if kwant_complete else "incomplete",
             }
+
+            if not kwant_complete and model.primary_for_rgf:
+                if rgf_rows is None or rgf_jobs is None:
+                    rgf_rows, rgf_jobs = _run_rgf_benchmark_axis(
+                        source_cfg=source_cfg,
+                        axis_dir=axis_dir,
+                        canonical=canonical,
+                        model=model,
+                        axis=axis,
+                        spec=spec,
+                        fermi_ev_f=fermi_ev_f,
+                        length_uc=length_uc,
+                        transport_nodes=int(transport_nodes),
+                        live_log=live_log,
+                        log_poll_interval=log_poll_interval,
+                        stale_log_seconds=stale_log_seconds,
+                    )
+                partial_summary = _write_partial_nanowire_axis_artifacts(
+                    axis_dir=axis_dir,
+                    spec=spec,
+                )
+                axis_summary["rgf_jobs"] = rgf_jobs
+                axis_summary["partial_overlap"] = {
+                    "status": str(partial_summary.get("status", "unknown")),
+                    "overlap_points": int(partial_summary.get("overlap_points", 0) or 0),
+                    "comparison": partial_summary.get("comparison"),
+                    "missing_in_rgf": len(partial_summary.get("missing_in_rgf", []) or []),
+                    "missing_in_kwant": len(partial_summary.get("missing_in_kwant", []) or []),
+                }
+                partial_comparison = partial_summary.get("comparison")
+                if not isinstance(partial_comparison, dict):
+                    raise click.ClickException(
+                        f"Benchmark incomplete for {model.key}:{axis} and no overlap comparison could be formed. "
+                        f"See {axis_dir / 'comparison_partial.json'}"
+                    )
+                if str(partial_comparison.get("status", "")).strip().lower() != "ok":
+                    axis_summary["status"] = "failed"
+                    axis_summary["reason"] = "rgf_partial_validation_failed"
+                    failed_targets.append(f"{model.key}:{axis}:rgf_partial")
+                    model_summary["axes"][axis] = axis_summary
+                    continue
+                raise click.ClickException(
+                    f"Benchmark incomplete for {model.key}:{axis}, but current overlap still passes. "
+                    f"Full Kwant completion is still required. See {axis_dir / 'comparison_partial.json'}"
+                )
 
             if str(kwant_validation.get("status", "")).strip().lower() not in {"ok", "skipped"}:
                 axis_summary["status"] = "failed"

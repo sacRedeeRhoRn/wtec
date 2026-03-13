@@ -10,14 +10,17 @@ import numpy as np
 import pytest
 
 from wtec.cli import (
+    _KwantOverlapError,
     _append_nanowire_benchmark_trace,
     _build_nanowire_benchmark_source_seed,
     _build_tis_benchmark_source_cfg,
     _ensure_nanowire_benchmark_rgf_router_ready,
     _load_complete_nanowire_kwant_reference,
+    _load_nanowire_kwant_reference_checkpoint,
     _resolve_nanowire_benchmark_source_structure,
     _run_rgf_benchmark_axis,
     _run_kwant_and_rgf_overlap,
+    _write_partial_nanowire_axis_artifacts,
 )
 from wtec.config.materials import get_material
 from wtec.qe.lcao import get_projections
@@ -219,6 +222,75 @@ def test_load_complete_nanowire_kwant_reference_accepts_complete_checkpoint(tmp_
     assert _load_complete_nanowire_kwant_reference(path, spec=spec) == payload
 
 
+def test_load_nanowire_kwant_reference_checkpoint_accepts_partial_payload(tmp_path: Path) -> None:
+    path = tmp_path / "kwant_reference.json"
+    payload = {
+        "status": "partial",
+        "task_count_expected": 2,
+        "task_count_completed": 1,
+        "results": [
+            {
+                "thickness_uc": 1,
+                "energy_rel_fermi_ev": -0.2,
+                "energy_abs_ev": 13.4046,
+                "transmission_e2_over_h": 34.0,
+            }
+        ],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert _load_nanowire_kwant_reference_checkpoint(path) == payload
+
+
+def test_write_partial_nanowire_axis_artifacts_writes_json_and_markdown(tmp_path: Path) -> None:
+    axis_dir = tmp_path / "model_b" / "c"
+    (axis_dir / "kwant").mkdir(parents=True)
+    (axis_dir / "kwant" / "kwant_payload.json").write_text(
+        json.dumps({"fermi_ev": 1.5}),
+        encoding="utf-8",
+    )
+    (axis_dir / "kwant" / "kwant_reference.json").write_text(
+        json.dumps(
+            {
+                "results": [
+                    {
+                        "thickness_uc": 5,
+                        "energy_rel_fermi_ev": -0.1,
+                        "energy_abs_ev": 1.4,
+                        "transmission_e2_over_h": 0.75,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    transport_dir = axis_dir / "rgf" / "d05_em0p1" / "transport" / "primary"
+    transport_dir.mkdir(parents=True)
+    (transport_dir / "transport_payload_primary_001.json").write_text(
+        json.dumps(
+            {
+                "thicknesses": [5],
+                "disorder_strengths": [0.0],
+                "mfp_lengths": [],
+                "energy": 1.4,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (transport_dir / "transport_result.json").write_text(
+        json.dumps({"transport_results": {"thickness_scan": {"0.0": {"G_mean": [0.5]}}}}),
+        encoding="utf-8",
+    )
+
+    summary = _write_partial_nanowire_axis_artifacts(
+        axis_dir=axis_dir,
+        spec=NanowireBenchmarkSpec(),
+    )
+
+    assert summary["status"] == "failed"
+    assert (axis_dir / "comparison_partial.json").exists()
+    assert (axis_dir / "comparison_partial.md").exists()
+
+
 def test_ensure_nanowire_benchmark_rgf_router_ready_reuses_ready_state(monkeypatch) -> None:
     spec = NanowireBenchmarkSpec()
     selected_models = select_benchmark_models(spec)
@@ -351,6 +423,24 @@ def test_run_kwant_and_rgf_overlap_cancels_kwant_when_rgf_raises() -> None:
 
     assert kwant_cancelled.is_set()
     assert call_order == ["kwant_started", "rgf_failed", "kwant_cancelled"]
+
+
+def test_run_kwant_and_rgf_overlap_preserves_rgf_rows_on_kwant_runtime_error() -> None:
+    def _submit_kwant_reference(cancel_event=None):
+        assert cancel_event is not None
+        return (_ for _ in ()).throw(RuntimeError("kwant incomplete"))
+
+    def _run_rgf_axis():
+        return [{"thickness_uc": 1}], [{"job_id": "rgf"}]
+
+    with pytest.raises(_KwantOverlapError, match="kwant incomplete") as excinfo:
+        _run_kwant_and_rgf_overlap(
+            submit_kwant_reference=_submit_kwant_reference,
+            run_rgf_axis=_run_rgf_axis,
+        )
+
+    assert excinfo.value.rgf_rows == [{"thickness_uc": 1}]
+    assert excinfo.value.rgf_jobs == [{"job_id": "rgf"}]
 
 
 def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
