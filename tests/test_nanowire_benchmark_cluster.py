@@ -120,6 +120,11 @@ def test_submit_kwant_nanowire_reference_uses_conservative_multi_rank_layout(
     assert "export OPENBLAS_NUM_THREADS=16" in script
     assert "export NUMEXPR_NUM_THREADS=16" in script
     assert "mpirun -np 4 --bind-to none" in script
+    assert seen["kwargs"]["live_retrieve_patterns"] == [
+        "kwant_reference.json",
+        "kwant_reference.rank*.jsonl",
+    ]
+    assert seen["kwargs"]["live_retrieve_interval_seconds"] == 5
     assert result["validation"]["status"] == "ok"
     assert meta["status"] == "ok"
 

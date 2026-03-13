@@ -434,6 +434,7 @@ def test_stage_transport_rgf_qsub_writes_standard_transport_payload(tmp_path, mo
         def submit_and_wait(self, script, remote_dir, local_dir, retrieve_patterns, script_name, stage_files, expected_local_outputs, queue_used, **kwargs):
             captured["retrieve_patterns"] = list(retrieve_patterns)
             captured["live_files"] = list(kwargs.get("live_files", []))
+            captured["live_retrieve_patterns"] = list(kwargs.get("live_retrieve_patterns", []))
             captured["payload"] = json.loads(Path(stage_files[0]).read_text())
             for name in retrieve_patterns:
                 if name.endswith(".jsonl") or name.endswith(".log"):
@@ -511,6 +512,7 @@ def test_stage_transport_rgf_qsub_writes_standard_transport_payload(tmp_path, mo
     assert captured["payload"]["expected_omp_threads"] == 6
     assert captured["payload"]["progress_file"] in captured["retrieve_patterns"]
     assert captured["payload"]["progress_file"] in captured["live_files"]
+    assert captured["payload"]["progress_file"] in captured["live_retrieve_patterns"]
     written = json.loads((Path(cfg["run_dir"]) / "transport" / "primary" / "transport_result.json").read_text())
     assert written["runtime_cert"]["numerical_status"] == "phase1_ready"
     assert written["runtime_cert"]["parallel_policy"] == "throughput"
@@ -810,6 +812,7 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
         ):
             captured["script"] = script
             captured["retrieve_patterns"] = list(retrieve_patterns)
+            captured["live_retrieve_patterns"] = list(kwargs.get("live_retrieve_patterns", []))
             captured["stage_file_names"] = [Path(path).name for path in stage_files]
             captured["payload"] = json.loads(Path(stage_files[0]).read_text())
             raw = {
@@ -888,8 +891,11 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
     assert "--hr-path " in str(captured["script"])
     assert "_canonical_hr.dat" in str(captured["script"])
     assert "sigma_manifest.json" in captured["retrieve_patterns"]
+    assert "sigma_manifest.json" in captured["live_retrieve_patterns"]
     assert "sigma_left.bin" in captured["retrieve_patterns"]
+    assert "sigma_left.bin" in captured["live_retrieve_patterns"]
     assert "sigma_right.bin" in captured["retrieve_patterns"]
+    assert "sigma_right.bin" in captured["live_retrieve_patterns"]
     assert "wtec_src.zip" in captured["stage_file_names"]
     assert captured["payload"]["sigma_left_path"] == "sigma_left.bin"
     assert captured["payload"]["sigma_right_path"] == "sigma_right.bin"

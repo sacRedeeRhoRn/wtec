@@ -477,6 +477,10 @@ class JobManager:
         live_log: bool = False,
         live_remote_dir: str | None = None,
         live_files: list[str] | None = None,
+        live_retrieve_remote_dir: str | None = None,
+        live_retrieve_local_dir: str | Path | None = None,
+        live_retrieve_patterns: list[str] | None = None,
+        live_retrieve_interval_seconds: int = 0,
         stale_log_seconds: int = 300,
         stream_from_start: bool = False,
         cancel_event=None,
@@ -500,6 +504,8 @@ class JobManager:
         last_log_growth = time.time()
         log_offsets: dict[str, int | None] = {}
         log_paths: list[str] = []
+        live_retrieve_interval_seconds = max(0, int(live_retrieve_interval_seconds))
+        last_live_retrieve_elapsed = -live_retrieve_interval_seconds
         cancel_requested = False
         if live_log and live_remote_dir and live_files:
             for name in live_files:
@@ -529,6 +535,25 @@ class JobManager:
             if had_growth:
                 last_log_growth = time.time()
                 stale_warned = False
+            if (
+                s == "RUNNING"
+                and live_retrieve_interval_seconds > 0
+                and live_retrieve_remote_dir
+                and live_retrieve_local_dir is not None
+                and live_retrieve_patterns
+                and (elapsed - last_live_retrieve_elapsed) >= live_retrieve_interval_seconds
+            ):
+                # Best-effort sync of in-flight artifacts such as partial checkpoints
+                # and progress logs while the remote job is still running.
+                try:
+                    self.retrieve(
+                        live_retrieve_remote_dir,
+                        live_retrieve_local_dir,
+                        live_retrieve_patterns,
+                    )
+                except Exception:
+                    pass
+                last_live_retrieve_elapsed = elapsed
             if verbose:
                 state = details.get("scheduler_state")
                 src = details.get("source")
@@ -596,6 +621,8 @@ class JobManager:
         verbose: bool = True,
         live_log: bool = False,
         live_files: list[str] | None = None,
+        live_retrieve_patterns: list[str] | None = None,
+        live_retrieve_interval_seconds: int = 0,
         stale_log_seconds: int = 300,
         retrieve_on_failure: bool = False,
         stream_from_start: bool = False,
@@ -624,6 +651,10 @@ class JobManager:
             live_log=live_log,
             live_remote_dir=remote_dir,
             live_files=live_files,
+            live_retrieve_remote_dir=remote_dir,
+            live_retrieve_local_dir=local_dir,
+            live_retrieve_patterns=live_retrieve_patterns,
+            live_retrieve_interval_seconds=live_retrieve_interval_seconds,
             stale_log_seconds=stale_log_seconds,
             stream_from_start=stream_from_start,
             cancel_event=cancel_event,

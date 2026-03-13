@@ -211,6 +211,11 @@ def submit_kwant_nanowire_reference(
                     verbose=True,
                     live_log=bool(live_log),
                     live_files=[result_path.name, "wtec_job.log"],
+                    live_retrieve_patterns=[
+                        result_path.name,
+                        f"{result_path.stem}.rank*.jsonl",
+                    ],
+                    live_retrieve_interval_seconds=int(max(5, poll_interval)),
                     stale_log_seconds=int(stale_log_seconds),
                     retrieve_on_failure=True,
                     stream_from_start=True,
