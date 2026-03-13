@@ -123,6 +123,7 @@ def test_submit_kwant_nanowire_reference_uses_conservative_multi_rank_layout(
     assert seen["kwargs"]["live_retrieve_patterns"] == [
         "kwant_reference.json",
         "kwant_reference.rank*.jsonl",
+        "wtec_job.log",
     ]
     assert seen["kwargs"]["live_retrieve_interval_seconds"] == 5
     assert callable(seen["kwargs"]["live_retrieve_hook"])

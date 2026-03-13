@@ -224,6 +224,7 @@ def submit_kwant_nanowire_reference(
                     live_retrieve_patterns=[
                         result_path.name,
                         f"{result_path.stem}.rank*.jsonl",
+                        "wtec_job.log",
                     ],
                     live_retrieve_interval_seconds=int(max(5, poll_interval)),
                     live_retrieve_hook=_merge_local_checkpoint,
