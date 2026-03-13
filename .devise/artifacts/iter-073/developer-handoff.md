@@ -123,14 +123,14 @@ Current local Kwant state remains the lagging side, but it is now isolated to th
 [kwant-bench][rank=3] heartbeat thickness_uc=3 energy_abs_ev=13.704600 elapsed_s=20.0
 [kwant-bench][rank=2] heartbeat thickness_uc=3 energy_abs_ev=13.604600 elapsed_s=20.0
 [kwant-bench][rank=0] heartbeat thickness_uc=3 energy_abs_ev=13.404600 elapsed_s=20.0
-[kwant-bench][rank=1] heartbeat thickness_uc=3 energy_abs_ev=13.504600 elapsed_s=40.0
-[kwant-bench][rank=3] heartbeat thickness_uc=3 energy_abs_ev=13.704600 elapsed_s=40.0
-[kwant-bench][rank=2] heartbeat thickness_uc=3 energy_abs_ev=13.604600 elapsed_s=40.0
-[kwant-bench][rank=0] heartbeat thickness_uc=3 energy_abs_ev=13.404600 elapsed_s=40.0
-[kwant-bench][rank=1] heartbeat thickness_uc=3 energy_abs_ev=13.504600 elapsed_s=60.0
-[kwant-bench][rank=3] heartbeat thickness_uc=3 energy_abs_ev=13.704600 elapsed_s=60.0
-[kwant-bench][rank=2] heartbeat thickness_uc=3 energy_abs_ev=13.604600 elapsed_s=60.0
-[kwant-bench][rank=0] heartbeat thickness_uc=3 energy_abs_ev=13.404600 elapsed_s=60.0
+[kwant-bench][rank=1] heartbeat thickness_uc=3 energy_abs_ev=13.504600 elapsed_s=100.0
+[kwant-bench][rank=3] heartbeat thickness_uc=3 energy_abs_ev=13.704600 elapsed_s=100.0
+[kwant-bench][rank=2] heartbeat thickness_uc=3 energy_abs_ev=13.604600 elapsed_s=100.0
+[kwant-bench][rank=0] heartbeat thickness_uc=3 energy_abs_ev=13.404600 elapsed_s=100.0
+[kwant-bench][rank=1] heartbeat thickness_uc=3 energy_abs_ev=13.504600 elapsed_s=180.0
+[kwant-bench][rank=3] heartbeat thickness_uc=3 energy_abs_ev=13.704600 elapsed_s=180.0
+[kwant-bench][rank=2] heartbeat thickness_uc=3 energy_abs_ev=13.604600 elapsed_s=180.0
+[kwant-bench][rank=0] heartbeat thickness_uc=3 energy_abs_ev=13.404600 elapsed_s=180.0
 ```
 
 The native side reused the full cached thickness-1, thickness-3, and `d05_em0p2` results locally and advanced the live frontier into `d05_em0p1`:
@@ -163,6 +163,8 @@ The current live native frontier `d05_em0p1` is staged and running on the real c
 [wtec][sigma] full_finite_principal_geometry_ready norb=16 principal_layer_width=6 pad_x=5 nx_effective=34 lead_dim=6240 slice_widths=6,6,6,10,6
 [wtec][sigma] full_finite_principal_blocks_ready h_lead_shape=6240x6240 v_lead_shape=6240x6240
 [wtec][sigma] selfenergy_left_start lead_dim=6240 solver=lopez_sancho
+[wtec][sigma] selfenergy_left_done wall_seconds=176.242 solver=lopez_sancho iterations=22
+[wtec][sigma] selfenergy_right_start lead_dim=6240 solver=lopez_sancho
 ```
 
 ## Still Unresolved
