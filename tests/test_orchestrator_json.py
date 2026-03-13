@@ -4,7 +4,7 @@ import json
 import sys
 import types
 
-from wtec.workflow.orchestrator import TopoSlabWorkflow, _jsonable
+from wtec.workflow.orchestrator import TopoSlabWorkflow, _jsonable, resolve_transport_rgf_eta
 from wtec.wannier.parser import HoppingData, write_hr_dat
 
 
@@ -54,7 +54,7 @@ def test_transport_stage_routes_to_kwant_qsub(tmp_path, monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 
     monkeypatch.setattr(wf, "_set_stage", lambda stage: calls.append(("set_stage", stage)))
-    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda: None)
+    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda *args, **kwargs: None)
     monkeypatch.setattr(wf, "_save_checkpoint", lambda: calls.append(("save", "checkpoint")))
 
     def _fake_qsub(hr_dat: Path, label: str = "primary"):
@@ -86,7 +86,7 @@ def test_transport_stage_routes_auto_to_kwant_qsub(tmp_path, monkeypatch) -> Non
     calls: list[tuple[str, str]] = []
 
     monkeypatch.setattr(wf, "_set_stage", lambda stage: calls.append(("set_stage", stage)))
-    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda: None)
+    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda *args, **kwargs: None)
     monkeypatch.setattr(wf, "_save_checkpoint", lambda: calls.append(("save", "checkpoint")))
 
     def _fake_qsub(hr_dat: Path, label: str = "primary"):
@@ -141,7 +141,7 @@ def test_transport_stage_routes_auto_to_rgf_qsub_when_router_ready(tmp_path, mon
     calls: list[tuple[str, str, str]] = []
 
     monkeypatch.setattr(wf, "_set_stage", lambda stage: calls.append(("set_stage", stage, "")))
-    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda: None)
+    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda *args, **kwargs: None)
     monkeypatch.setattr(wf, "_save_checkpoint", lambda: calls.append(("save", "checkpoint", "")))
 
     def _fake_rgf_qsub(hr_dat: Path, label: str = "primary"):
@@ -174,7 +174,7 @@ def test_transport_stage_routes_rgf_to_native_qsub(tmp_path, monkeypatch) -> Non
     calls: list[tuple[str, str, str]] = []
 
     monkeypatch.setattr(wf, "_set_stage", lambda stage: calls.append(("set_stage", stage, "")))
-    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda: None)
+    monkeypatch.setattr(wf, "_load_cached_transport_results", lambda *args, **kwargs: None)
     monkeypatch.setattr(wf, "_save_checkpoint", lambda: calls.append(("save", "checkpoint", "")))
 
     def _fake_rgf_qsub(hr_dat: Path, label: str = "primary"):
@@ -344,6 +344,67 @@ def test_load_cached_transport_results_rejects_full_finite_cache_without_exact_s
                     "thickness_scan": {"0.0": {"thicknesses": [1], "values": [12.5]}},
                 },
                 "runtime_cert": {"mode": "full_finite"},
+            }
+        )
+    )
+    cfg = {
+        "name": "demo",
+        "run_dir": str(run_dir),
+        "transport_engine": "rgf",
+        "transport_backend": "qsub",
+        "transport_strict_qsub": True,
+        "transport_rgf_mode": "full_finite",
+        "transport_rgf_full_finite_sigma_backend": "native",
+        "_transport_rgf_internal_sigma_mode": "kwant_exact",
+        "reuse_transport_results": True,
+    }
+    wf = TopoSlabWorkflow.from_config(cfg)
+
+    assert wf._load_cached_transport_results(label="primary") is None
+
+
+def test_resolve_transport_rgf_eta_defaults_to_small_eta_for_exact_sigma() -> None:
+    assert resolve_transport_rgf_eta(
+        {
+            "transport_rgf_mode": "full_finite",
+            "_transport_rgf_internal_sigma_mode": "kwant_exact",
+        },
+        internal_sigma_mode="kwant_exact",
+    ) == 1.0e-8
+    assert resolve_transport_rgf_eta(
+        {
+            "transport_rgf_mode": "full_finite",
+            "_transport_rgf_internal_sigma_mode": "kwant_exact",
+            "transport_rgf_eta": 1.0e-7,
+        },
+        internal_sigma_mode="kwant_exact",
+    ) == 1.0e-7
+
+
+def test_load_cached_transport_results_rejects_full_finite_cache_with_exact_sigma_eta_mismatch(
+    tmp_path,
+) -> None:
+    run_dir = tmp_path / "run"
+    result_path = run_dir / "transport" / "primary" / "transport_result.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(
+        json.dumps(
+            {
+                "transport_results": {
+                    "meta": {
+                        "transport_engine": "rgf",
+                        "rgf_full_finite_sigma_backend": "native",
+                        "rgf_full_finite_sigma_source": "kwant_exact",
+                    },
+                    "thickness_scan": {"0.0": {"thicknesses": [1], "values": [12.5]}},
+                },
+                "transport_results_raw": {
+                    "eta": 1.0e-6,
+                },
+                "runtime_cert": {
+                    "mode": "full_finite",
+                    "full_finite_sigma_source": "kwant_exact",
+                },
             }
         )
     )
@@ -939,6 +1000,7 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
     assert "wtec_src.zip" in captured["stage_file_names"]
     assert captured["payload"]["sigma_left_path"] == "sigma_left.bin"
     assert captured["payload"]["sigma_right_path"] == "sigma_right.bin"
+    assert captured["payload"]["eta"] == 1.0e-8
     written = json.loads((Path(cfg["run_dir"]) / "transport" / "primary" / "transport_result.json").read_text())
     assert written["runtime_cert"]["full_finite_sigma_source"] == "kwant_exact"
     attempt_dir = Path(meta["attempt_dir"])

@@ -573,12 +573,31 @@ def test_benchmark_transport_writes_failed_summary_from_partial_overlap(tmp_path
                     "disorder_strengths": [0.0],
                     "mfp_lengths": [],
                     "energy": 13.6046,
+                    "eta": 1.0e-8,
+                    "transport_rgf_mode": "full_finite",
+                    "sigma_left_path": "sigma_left.bin",
+                    "sigma_right_path": "sigma_right.bin",
                 }
             ),
             encoding="utf-8",
         )
         (transport_dir / "transport_result.json").write_text(
-            json.dumps({"transport_results": {"thickness_scan": {"0.0": {"G_mean": [29.88663916904678]}}}}),
+            json.dumps(
+                {
+                    "runtime_cert": {
+                        "full_finite_sigma_source": "kwant_exact",
+                    },
+                    "transport_results": {
+                        "meta": {
+                            "rgf_full_finite_sigma_source": "kwant_exact",
+                        },
+                        "thickness_scan": {"0.0": {"G_mean": [29.88663916904678]}},
+                    },
+                    "transport_results_raw": {
+                        "eta": 1.0e-8,
+                    },
+                }
+            ),
             encoding="utf-8",
         )
         return (
@@ -800,12 +819,31 @@ def test_benchmark_transport_uses_existing_log_overlap_before_launch(tmp_path: P
                 "disorder_strengths": [0.0],
                 "mfp_lengths": [],
                 "energy": 13.6046,
+                "eta": 1.0e-8,
+                "transport_rgf_mode": "full_finite",
+                "sigma_left_path": "sigma_left.bin",
+                "sigma_right_path": "sigma_right.bin",
             }
         ),
         encoding="utf-8",
     )
     (rgf_dir / "transport_result.json").write_text(
-        json.dumps({"transport_results": {"thickness_scan": {"0.0": {"G_mean": [29.88663916904678]}}}}),
+        json.dumps(
+            {
+                "runtime_cert": {
+                    "full_finite_sigma_source": "kwant_exact",
+                },
+                "transport_results": {
+                    "meta": {
+                        "rgf_full_finite_sigma_source": "kwant_exact",
+                    },
+                    "thickness_scan": {"0.0": {"G_mean": [29.88663916904678]}},
+                },
+                "transport_results_raw": {
+                    "eta": 1.0e-8,
+                },
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -917,6 +955,7 @@ def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
         live_log=False,
         log_poll_interval=5,
         stale_log_seconds=300,
+        required_exact_eta=1.0e-8,
     )
 
     assert rows == [
@@ -929,6 +968,7 @@ def test_run_rgf_benchmark_axis_requests_exact_sigma_internal_mode(
     ]
     assert jobs == [{"job_id": "12345"}]
     assert seen_cfgs and seen_cfgs[0]["_transport_rgf_internal_sigma_mode"] == "kwant_exact"
+    assert seen_cfgs[0]["transport_rgf_eta"] == pytest.approx(1.0e-8)
     assert seen_cfgs[0]["reuse_transport_results"] is True
 
 

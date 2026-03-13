@@ -289,6 +289,23 @@ def _payload_has_exact_sigma_staging(payload: dict[str, Any]) -> bool:
     )
 
 
+def _payload_eta(payload: dict[str, Any]) -> float | None:
+    eta = payload.get("eta")
+    if eta is None:
+        return None
+    try:
+        return float(eta)
+    except Exception:
+        return None
+
+
+def _eta_matches(actual: float | None, expected: float) -> bool:
+    if actual is None:
+        return False
+    tol = max(1.0e-12, abs(float(expected)) * 1.0e-6)
+    return abs(float(actual) - float(expected)) <= tol
+
+
 def _transport_result_sigma_source(result_path: Path) -> str | None:
     payload = _json_load(result_path)
     if not isinstance(payload, dict):
@@ -307,7 +324,28 @@ def _transport_result_sigma_source(result_path: Path) -> str | None:
     return None
 
 
-def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = None) -> dict[str, Any]:
+def _transport_result_eta(result_path: Path) -> float | None:
+    payload = _json_load(result_path)
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("transport_results_raw", {})
+    if not isinstance(raw, dict):
+        return None
+    eta = raw.get("eta")
+    if eta is None:
+        return None
+    try:
+        return float(eta)
+    except Exception:
+        return None
+
+
+def scan_partial_rgf_results(
+    rgf_root: str | Path,
+    *,
+    fermi_ev: float | None = None,
+    required_exact_eta: float | None = None,
+) -> dict[str, Any]:
     root = Path(rgf_root).expanduser().resolve()
     if not root.exists():
         raise FileNotFoundError(f"RGF root not found: {root}")
@@ -325,6 +363,10 @@ def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = N
         payload = meta.get("payload", {})
         transport_dir = Path(meta["transport_dir"])
         requires_exact_sigma = isinstance(payload, dict) and _payload_requires_exact_sigma(payload)
+        if requires_exact_sigma and required_exact_eta is not None:
+            if not _eta_matches(_payload_eta(payload), required_exact_eta):
+                skipped.append(str(payload_path))
+                continue
 
         result_path = transport_dir / "transport_result.json"
         raw_paths = sorted(
@@ -346,6 +388,10 @@ def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = N
             if requires_exact_sigma and _transport_result_sigma_source(result_path) != "kwant_exact":
                 skipped.append(str(payload_path))
                 continue
+            if requires_exact_sigma and required_exact_eta is not None:
+                if not _eta_matches(_transport_result_eta(result_path), required_exact_eta):
+                    skipped.append(str(payload_path))
+                    continue
             transmission = _extract_rgf_from_transport_result(result_path)
             source_kind = "rgf_transport_result"
             source_path = result_path
@@ -388,6 +434,7 @@ def scan_partial_rgf_results(rgf_root: str | Path, *, fermi_ev: float | None = N
         "rows": rows,
         "row_count": len(rows),
         "skipped_payloads": skipped,
+        "required_exact_eta": (None if required_exact_eta is None else float(required_exact_eta)),
     }
 
 
@@ -396,10 +443,15 @@ def compare_partial_benchmark_progress(
     kwant_dir: str | Path,
     rgf_root: str | Path,
     spec: NanowireBenchmarkSpec | None = None,
+    required_exact_eta: float | None = None,
 ) -> dict[str, Any]:
     cfg = spec or NanowireBenchmarkSpec()
     kwant = scan_partial_kwant_results(kwant_dir)
-    rgf = scan_partial_rgf_results(rgf_root, fermi_ev=kwant.get("fermi_ev"))
+    rgf = scan_partial_rgf_results(
+        rgf_root,
+        fermi_ev=kwant.get("fermi_ev"),
+        required_exact_eta=required_exact_eta,
+    )
 
     kwant_rows = list(kwant["rows"])
     rgf_rows = list(rgf["rows"])

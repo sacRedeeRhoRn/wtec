@@ -162,6 +162,53 @@ def test_scan_partial_rgf_results_skips_full_finite_rows_without_exact_sigma_con
     assert str(payload_path) in out["skipped_payloads"]
 
 
+def test_scan_partial_rgf_results_skips_exact_sigma_rows_with_wrong_eta(tmp_path: Path) -> None:
+    transport_dir = tmp_path / "rgf" / "d05_em0p1" / "transport" / "primary"
+    payload_path = transport_dir / "transport_payload_primary_001.json"
+    _write_json(
+        payload_path,
+        {
+            "thicknesses": [5],
+            "disorder_strengths": [0.0],
+            "mfp_lengths": [],
+            "energy": 1.4,
+            "eta": 1.0e-6,
+            "transport_rgf_mode": "full_finite",
+            "sigma_left_path": "sigma_left.bin",
+            "sigma_right_path": "sigma_right.bin",
+        },
+    )
+    _write_json(
+        transport_dir / "transport_result.json",
+        {
+            "runtime_cert": {
+                "full_finite_sigma_source": "kwant_exact",
+            },
+            "transport_results": {
+                "meta": {
+                    "rgf_full_finite_sigma_source": "kwant_exact",
+                },
+                "thickness_scan": {
+                    "0.0": {
+                        "G_mean": [0.76],
+                    }
+                },
+            },
+            "transport_results_raw": {
+                "eta": 1.0e-6,
+            },
+        },
+    )
+
+    out = scan_partial_rgf_results(
+        tmp_path / "rgf",
+        fermi_ev=1.5,
+        required_exact_eta=1.0e-8,
+    )
+    assert out["row_count"] == 0
+    assert str(payload_path) in out["skipped_payloads"]
+
+
 def test_compare_partial_benchmark_progress_uses_overlap_only(tmp_path: Path) -> None:
     kwant_dir = tmp_path / "kwant"
     _write_json(
@@ -218,6 +265,72 @@ def test_compare_partial_benchmark_progress_uses_overlap_only(tmp_path: Path) ->
     assert out["comparison"]["checked_points"] == 1
     assert len(out["missing_in_rgf"]) == 1
     assert out["missing_in_rgf"][0]["thickness_uc"] == 7
+
+
+def test_compare_partial_benchmark_progress_ignores_overlap_with_wrong_exact_eta(tmp_path: Path) -> None:
+    kwant_dir = tmp_path / "kwant"
+    _write_json(
+        kwant_dir / "kwant_reference.json",
+        {
+            "fermi_ev": 1.5,
+            "results": [
+                {
+                    "thickness_uc": 5,
+                    "energy_rel_fermi_ev": -0.1,
+                    "energy_abs_ev": 1.4,
+                    "transmission_e2_over_h": 0.75,
+                }
+            ],
+            "validation": {"status": "ok"},
+        },
+    )
+
+    transport_dir = tmp_path / "rgf" / "d05_em0p1" / "transport" / "primary"
+    payload_path = transport_dir / "transport_payload_primary_001.json"
+    _write_json(
+        payload_path,
+        {
+            "thicknesses": [5],
+            "disorder_strengths": [0.0],
+            "mfp_lengths": [],
+            "energy": 1.4,
+            "eta": 1.0e-6,
+            "transport_rgf_mode": "full_finite",
+            "sigma_left_path": "sigma_left.bin",
+            "sigma_right_path": "sigma_right.bin",
+        },
+    )
+    _write_json(
+        transport_dir / "transport_result.json",
+        {
+            "runtime_cert": {
+                "full_finite_sigma_source": "kwant_exact",
+            },
+            "transport_results": {
+                "meta": {
+                    "rgf_full_finite_sigma_source": "kwant_exact",
+                },
+                "thickness_scan": {
+                    "0.0": {
+                        "G_mean": [0.750001],
+                    }
+                },
+            },
+            "transport_results_raw": {
+                "eta": 1.0e-6,
+            },
+        },
+    )
+
+    out = compare_partial_benchmark_progress(
+        kwant_dir=kwant_dir,
+        rgf_root=tmp_path / "rgf",
+        required_exact_eta=1.0e-8,
+    )
+    assert out["status"] == "missing_rgf_points"
+    assert out["overlap_points"] == 0
+    assert out["rgf"]["row_count"] == 0
+    assert str(payload_path) in out["rgf"]["skipped_payloads"]
 
 
 def test_compare_partial_benchmark_progress_skips_incomplete_rgf_progress(tmp_path: Path) -> None:

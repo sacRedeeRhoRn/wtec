@@ -44,6 +44,9 @@ STAGES = [
     "DONE",
 ]
 
+DEFAULT_TRANSPORT_RGF_ETA = 1.0e-6
+DEFAULT_TRANSPORT_RGF_EXACT_SIGMA_ETA = 1.0e-8
+
 
 def _wtec_state_dir() -> Path:
     env_dir = os.environ.get("WTEC_STATE_DIR")
@@ -76,6 +79,35 @@ def _load_init_state() -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def resolve_transport_rgf_eta(
+    config: dict[str, Any],
+    *,
+    internal_sigma_mode: str | None = None,
+) -> float:
+    explicit_eta = config.get("transport_rgf_eta")
+    if explicit_eta is not None:
+        if not isinstance(explicit_eta, str) or explicit_eta.strip():
+            return float(explicit_eta)
+    rgf_mode = str(config.get("transport_rgf_mode", "")).strip().lower()
+    sigma_backend = (
+        str(config.get("transport_rgf_full_finite_sigma_backend", "native")).strip().lower()
+        or "native"
+    )
+    sigma_source = (
+        str(
+            internal_sigma_mode
+            if internal_sigma_mode is not None
+            else config.get("_transport_rgf_internal_sigma_mode", sigma_backend)
+        )
+        .strip()
+        .lower()
+        or sigma_backend
+    )
+    if rgf_mode == "full_finite" and sigma_source == "kwant_exact":
+        return float(DEFAULT_TRANSPORT_RGF_EXACT_SIGMA_ETA)
+    return float(DEFAULT_TRANSPORT_RGF_ETA)
 
 
 class TopoSlabWorkflow:
@@ -1484,7 +1516,10 @@ class TopoSlabWorkflow:
             "n_ensemble": int(self.cfg.get("n_ensemble", 1)),
             "base_seed": int(self.cfg.get("base_seed", 0)),
             "energy": float(self.cfg.get("fermi_shift_eV", 0.0)),
-            "eta": float(self.cfg.get("transport_rgf_eta", 1.0e-6)),
+            "eta": resolve_transport_rgf_eta(
+                self.cfg,
+                internal_sigma_mode=internal_sigma_mode,
+            ),
             "mfp_n_layers_z": mfp_n_layers_z,
             "mfp_lengths": mfp_lengths,
             "lead_axis": "x",
@@ -1968,6 +2003,15 @@ class TopoSlabWorkflow:
         )
         return sigma_source if sigma_source == "kwant_exact" else None
 
+    def _required_cached_rgf_eta(self) -> float | None:
+        sigma_source = self._required_cached_rgf_sigma_source()
+        if sigma_source != "kwant_exact":
+            return None
+        return resolve_transport_rgf_eta(
+            self.cfg,
+            internal_sigma_mode=sigma_source,
+        )
+
     @staticmethod
     def _transport_result_sigma_source(payload: dict[str, Any]) -> str | None:
         runtime_cert = payload.get("runtime_cert", {})
@@ -1983,6 +2027,25 @@ class TopoSlabWorkflow:
                 return source
         return None
 
+    @staticmethod
+    def _transport_result_eta(payload: dict[str, Any]) -> float | None:
+        raw = payload.get("transport_results_raw", {})
+        if isinstance(raw, dict):
+            eta = raw.get("eta")
+            if eta is not None:
+                try:
+                    return float(eta)
+                except Exception:
+                    return None
+        return None
+
+    @staticmethod
+    def _eta_matches(actual: float | None, expected: float) -> bool:
+        if actual is None:
+            return False
+        tol = max(1.0e-12, abs(float(expected)) * 1.0e-6)
+        return abs(float(actual) - float(expected)) <= tol
+
     def _load_cached_transport_results(self, *, label: str = "primary") -> dict | None:
         run_profile = str(self.cfg.get("run_profile", "strict")).strip().lower() or "strict"
         default_reuse = run_profile == "smoke"
@@ -1997,10 +2060,15 @@ class TopoSlabWorkflow:
             if not isinstance(res, dict):
                 return None
             required_sigma_source = self._required_cached_rgf_sigma_source()
+            required_eta = self._required_cached_rgf_eta()
             if required_sigma_source is not None:
                 cached_sigma_source = self._transport_result_sigma_source(payload)
                 if cached_sigma_source != required_sigma_source:
                     return None
+                if required_eta is not None:
+                    cached_eta = self._transport_result_eta(payload)
+                    if not self._eta_matches(cached_eta, required_eta):
+                        return None
             return self._normalize_transport_results(res)
         except Exception:
             return None

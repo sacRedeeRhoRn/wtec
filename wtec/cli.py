@@ -8357,6 +8357,7 @@ def _write_partial_nanowire_axis_artifacts(
     axis_dir: Path,
     spec: Any,
     summary: dict[str, Any] | None = None,
+    required_exact_eta: float | None = None,
 ) -> dict[str, Any]:
     from wtec.transport.nanowire_benchmark_progress import (
         compare_partial_benchmark_progress,
@@ -8368,6 +8369,7 @@ def _write_partial_nanowire_axis_artifacts(
             kwant_dir=axis_dir / "kwant",
             rgf_root=axis_dir / "rgf",
             spec=spec,
+            required_exact_eta=required_exact_eta,
         )
     (axis_dir / "comparison_partial.json").write_text(json.dumps(summary, indent=2))
     (axis_dir / "comparison_partial.md").write_text(
@@ -8381,6 +8383,7 @@ def _load_existing_nanowire_partial_overlap(
     *,
     axis_dir: Path,
     spec: Any,
+    required_exact_eta: float | None = None,
 ) -> dict[str, Any] | None:
     from wtec.transport.nanowire_benchmark_progress import (
         compare_partial_benchmark_progress,
@@ -8395,6 +8398,7 @@ def _load_existing_nanowire_partial_overlap(
             kwant_dir=kwant_dir,
             rgf_root=rgf_root,
             spec=spec,
+            required_exact_eta=required_exact_eta,
         )
     except FileNotFoundError:
         return None
@@ -8481,8 +8485,9 @@ def _run_rgf_benchmark_axis(
     live_log: bool,
     log_poll_interval: int,
     stale_log_seconds: int,
+    required_exact_eta: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    from wtec.workflow.orchestrator import TopoSlabWorkflow
+    from wtec.workflow.orchestrator import TopoSlabWorkflow, resolve_transport_rgf_eta
 
     rgf_rows: list[dict[str, Any]] = []
     rgf_jobs: list[dict[str, Any]] = []
@@ -8522,6 +8527,8 @@ def _run_rgf_benchmark_axis(
             rgf_cfg["transport_rgf_full_finite_sigma_backend"] = "native"
             rgf_cfg["_transport_rgf_internal_sigma_mode"] = "kwant_exact"
             rgf_cfg["transport_rgf_full_finite_kwant_script"] = ""
+            if required_exact_eta is not None:
+                rgf_cfg["transport_rgf_eta"] = float(required_exact_eta)
             rgf_cfg["thicknesses"] = [int(thickness_uc)]
             rgf_cfg["disorder_strengths"] = [0.0]
             rgf_cfg["n_ensemble"] = 1
@@ -8579,6 +8586,7 @@ def _run_rgf_benchmark_axis(
             partial_summary = _load_existing_nanowire_partial_overlap(
                 axis_dir=axis_dir,
                 spec=spec,
+                required_exact_eta=required_exact_eta,
             )
             if partial_summary is not None:
                 partial_comparison = partial_summary.get("comparison")
@@ -8910,6 +8918,17 @@ def benchmark_transport(
                     fg="cyan",
                 )
             )
+            required_exact_eta = None
+            if model.primary_for_rgf:
+                exact_sigma_cfg = dict(source_cfg)
+                exact_sigma_cfg["transport_rgf_mode"] = "full_finite"
+                exact_sigma_cfg["_transport_rgf_internal_sigma_mode"] = "kwant_exact"
+                required_exact_eta = float(
+                    resolve_transport_rgf_eta(
+                        exact_sigma_cfg,
+                        internal_sigma_mode="kwant_exact",
+                    )
+                )
 
             kwant_benchmark_dir = axis_dir / "kwant"
             kwant_reference_path = kwant_benchmark_dir / "kwant_reference.json"
@@ -8935,6 +8954,7 @@ def benchmark_transport(
                     existing_partial_summary = _load_existing_nanowire_partial_overlap(
                         axis_dir=axis_dir,
                         spec=spec,
+                        required_exact_eta=required_exact_eta,
                     )
                 if existing_partial_summary is not None:
                     partial_comparison = existing_partial_summary.get("comparison")
@@ -8946,6 +8966,7 @@ def benchmark_transport(
                             axis_dir=axis_dir,
                             spec=spec,
                             summary=existing_partial_summary,
+                            required_exact_eta=required_exact_eta,
                         )
                         kwant_checkpoint = _load_nanowire_kwant_reference_checkpoint(kwant_reference_path) or {}
                         kwant_validation = (
@@ -9029,6 +9050,7 @@ def benchmark_transport(
                                 live_log=live_log,
                                 log_poll_interval=log_poll_interval,
                                 stale_log_seconds=stale_log_seconds,
+                                required_exact_eta=required_exact_eta,
                             ),
                         )
                     except _KwantOverlapError as exc:
@@ -9150,11 +9172,13 @@ def benchmark_transport(
                         live_log=live_log,
                         log_poll_interval=log_poll_interval,
                         stale_log_seconds=stale_log_seconds,
+                        required_exact_eta=required_exact_eta,
                     )
                 partial_summary = _write_partial_nanowire_axis_artifacts(
                     axis_dir=axis_dir,
                     spec=spec,
                     summary=live_partial_summary,
+                    required_exact_eta=required_exact_eta,
                 )
                 axis_summary["rgf_jobs"] = rgf_jobs
                 axis_summary["partial_overlap"] = {
@@ -9210,6 +9234,7 @@ def benchmark_transport(
                         live_log=live_log,
                         log_poll_interval=log_poll_interval,
                         stale_log_seconds=stale_log_seconds,
+                        required_exact_eta=required_exact_eta,
                     )
 
                 rgf_fit = build_article_fit_summary(
