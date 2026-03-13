@@ -337,6 +337,7 @@ def test_extract_kwant_sigmas_reports_full_finite_principal_progress(tmp_path: P
     ]
     assert any("lead_dim=2" in line for line in progress)
     assert any("manifest_path=sigma_manifest.json" in line for line in progress)
+    assert any("solver=lopez_sancho" in line for line in progress)
 
 
 @pytest.mark.skipif(
@@ -388,6 +389,10 @@ def test_rgf_native_runner_matches_principal_layer_exact_sigma_for_full_finite(t
     assert sigma_manifest["layout"] == "full_finite_principal"
     assert sigma_manifest["principal_layer_width"] == 2
     assert sigma_manifest["slice_widths"] == [2, 2, 2, 2]
+    assert sigma_manifest["sigma_solver_left"] == "lopez_sancho"
+    assert sigma_manifest["sigma_solver_right"] == "lopez_sancho"
+    assert sigma_manifest["sigma_solver_left_converged"] is True
+    assert sigma_manifest["sigma_solver_right_converged"] is True
 
     payload = {
         "hr_dat_path": "toy_hr.dat",

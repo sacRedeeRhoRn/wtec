@@ -16,6 +16,9 @@ from wtec.transport.kwant_block_extract import (
 )
 from wtec.wannier.parser import read_hr_dat
 
+_SANCHO_MAX_ITER = 512
+_SANCHO_TOL = 1.0e-10
+
 
 def _emit_progress(
     progress_cb: Callable[[str], None] | None,
@@ -29,6 +32,69 @@ def _emit_progress(
     if parts:
         line += " " + " ".join(parts)
     progress_cb(line)
+
+
+def _lopez_sancho_surface_green(
+    h0: np.ndarray,
+    v: np.ndarray,
+    *,
+    energy_ev: float,
+    eta_ev: float,
+    max_iter: int = _SANCHO_MAX_ITER,
+    conv_tol: float = _SANCHO_TOL,
+) -> tuple[np.ndarray, bool, int]:
+    h0_arr = np.asarray(h0, dtype=np.complex128)
+    v_arr = np.asarray(v, dtype=np.complex128)
+    n = int(h0_arr.shape[0])
+    eye = np.eye(n, dtype=np.complex128)
+    z = complex(float(energy_ev), float(eta_ev))
+
+    alpha = np.array(v_arr, copy=True)
+    beta = np.array(v_arr.conj().T, copy=True)
+    eps = np.array(h0_arr, copy=True)
+    eps_s = np.array(h0_arr, copy=True)
+
+    converged = False
+    iterations = 0
+    for iterations in range(1, int(max_iter) + 1):
+        g = np.linalg.solve(z * eye - eps, eye)
+        term1 = alpha @ g
+        term2 = beta @ g
+        next_a = term1 @ beta
+        next_b = term2 @ alpha
+        eps_s = eps_s + next_a
+        eps = eps + next_a + next_b
+        alpha = term1 @ alpha
+        beta = term2 @ beta
+        if np.linalg.norm(alpha) + np.linalg.norm(beta) < float(conv_tol):
+            converged = True
+            break
+
+    g_surf = np.linalg.solve(z * eye - eps_s, eye)
+    return g_surf, converged, int(iterations)
+
+
+def _lopez_sancho_selfenergy(
+    h0: np.ndarray,
+    coupling: np.ndarray,
+    *,
+    energy_ev: float,
+    eta_ev: float,
+    max_iter: int = _SANCHO_MAX_ITER,
+    conv_tol: float = _SANCHO_TOL,
+) -> tuple[np.ndarray, bool, int]:
+    g_surf, converged, iterations = _lopez_sancho_surface_green(
+        h0,
+        coupling,
+        energy_ev=energy_ev,
+        eta_ev=eta_ev,
+        max_iter=max_iter,
+        conv_tol=conv_tol,
+    )
+    z = complex(float(energy_ev), float(eta_ev))
+    eye = np.eye(int(np.asarray(h0).shape[0]), dtype=np.complex128)
+    sigma = np.asarray(z * eye - np.asarray(h0, dtype=np.complex128) - np.linalg.inv(g_surf))
+    return sigma, converged, iterations
 
 
 def _hr_dict(path: str | Path) -> tuple[int, dict[tuple[int, int, int], np.ndarray]]:
@@ -277,26 +343,84 @@ def extract_kwant_sigmas(
             dtype=np.complex128,
         )
         t0 = time.perf_counter()
-        _emit_progress(progress_cb, "selfenergy_left_start", lead_dim=int(h_lead.shape[0]))
-        sigma_left = np.asarray(
-            kwant.physics.selfenergy(lead_resolvent, v_lead),
-            dtype=np.complex128,
+        left_solver = "lopez_sancho"
+        _emit_progress(
+            progress_cb,
+            "selfenergy_left_start",
+            lead_dim=int(h_lead.shape[0]),
+            solver=left_solver,
         )
+        try:
+            sigma_left, left_converged, left_iterations = _lopez_sancho_selfenergy(
+                h_lead,
+                v_lead_r,
+                energy_ev=float(energy_ev),
+                eta_ev=float(eta_ev),
+            )
+            if not left_converged:
+                raise RuntimeError(
+                    f"Lopez-Sancho did not converge within {_SANCHO_MAX_ITER} iterations"
+                )
+        except Exception:
+            left_solver = "kwant_qz_fallback"
+            left_converged = False
+            left_iterations = int(_SANCHO_MAX_ITER)
+            _emit_progress(
+                progress_cb,
+                "selfenergy_left_fallback",
+                lead_dim=int(h_lead.shape[0]),
+                solver=left_solver,
+            )
+            sigma_left = np.asarray(
+                kwant.physics.selfenergy(lead_resolvent, v_lead),
+                dtype=np.complex128,
+            )
         _emit_progress(
             progress_cb,
             "selfenergy_left_done",
             wall_seconds=f"{time.perf_counter() - t0:.3f}",
+            solver=left_solver,
+            iterations=int(left_iterations),
         )
         t1 = time.perf_counter()
-        _emit_progress(progress_cb, "selfenergy_right_start", lead_dim=int(h_lead.shape[0]))
-        sigma_right = np.asarray(
-            kwant.physics.selfenergy(lead_resolvent, v_lead_r),
-            dtype=np.complex128,
+        right_solver = "lopez_sancho"
+        _emit_progress(
+            progress_cb,
+            "selfenergy_right_start",
+            lead_dim=int(h_lead.shape[0]),
+            solver=right_solver,
         )
+        try:
+            sigma_right, right_converged, right_iterations = _lopez_sancho_selfenergy(
+                h_lead,
+                v_lead,
+                energy_ev=float(energy_ev),
+                eta_ev=float(eta_ev),
+            )
+            if not right_converged:
+                raise RuntimeError(
+                    f"Lopez-Sancho did not converge within {_SANCHO_MAX_ITER} iterations"
+                )
+        except Exception:
+            right_solver = "kwant_qz_fallback"
+            right_converged = False
+            right_iterations = int(_SANCHO_MAX_ITER)
+            _emit_progress(
+                progress_cb,
+                "selfenergy_right_fallback",
+                lead_dim=int(h_lead.shape[0]),
+                solver=right_solver,
+            )
+            sigma_right = np.asarray(
+                kwant.physics.selfenergy(lead_resolvent, v_lead_r),
+                dtype=np.complex128,
+            )
         _emit_progress(
             progress_cb,
             "selfenergy_right_done",
             wall_seconds=f"{time.perf_counter() - t1:.3f}",
+            solver=right_solver,
+            iterations=int(right_iterations),
         )
 
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -323,6 +447,12 @@ def extract_kwant_sigmas(
             "sigma_right_path": str(sigma_right_path),
             "sigma_left_shape": list(sigma_left.shape),
             "sigma_right_shape": list(sigma_right.shape),
+            "sigma_solver_left": str(left_solver),
+            "sigma_solver_right": str(right_solver),
+            "sigma_solver_left_iterations": int(left_iterations),
+            "sigma_solver_right_iterations": int(right_iterations),
+            "sigma_solver_left_converged": bool(left_converged),
+            "sigma_solver_right_converged": bool(right_converged),
         }
         manifest_path.write_text(json.dumps(payload, indent=2))
         _emit_progress(
