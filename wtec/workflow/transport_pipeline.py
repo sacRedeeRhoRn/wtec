@@ -41,6 +41,7 @@ class TransportPipeline:
         progress_callback: Callable[..., None] | None = None,
         log_detail: str = "minimal",
         heartbeat_seconds: int = 20,
+        transport_engine: str = "kwant",
         kwant_mode: str = "auto",
         kwant_task_workers: int = 0,
     ) -> None:
@@ -80,8 +81,14 @@ class TransportPipeline:
         self._progress_callback = progress_callback
         self.log_detail = str(log_detail).strip().lower() or "minimal"
         self.heartbeat_seconds = max(5, int(heartbeat_seconds))
+        self.transport_engine = str(transport_engine).strip().lower() or "kwant"
         self.kwant_mode = str(kwant_mode).strip().lower() or "auto"
         self.kwant_task_workers = max(0, int(kwant_task_workers))
+        if self.transport_engine != "kwant":
+            raise ValueError(
+                f"Unsupported transport_engine={self.transport_engine!r}. "
+                "Only kwant-backed transport is implemented in TransportPipeline."
+            )
 
     def _emit(self, event: str, **payload: Any) -> None:
         cb = self._progress_callback
@@ -237,6 +244,7 @@ class TransportPipeline:
             n_disorder=int(len(self.disorder_strengths)),
             n_thickness=int(len(self.thicknesses)),
             n_ensemble=int(self.n_ensemble),
+            transport_engine=self.transport_engine,
             kwant_mode=self.kwant_mode,
             kwant_task_workers=int(self.kwant_task_workers),
         )
@@ -264,6 +272,7 @@ class TransportPipeline:
             "fermi_velocity_m_per_s": self.fermi_velocity_m_per_s,
             "log_detail": self.log_detail,
             "heartbeat_seconds": self.heartbeat_seconds,
+            "transport_engine": self.transport_engine,
             "kwant_mode": self.kwant_mode,
             "kwant_task_workers": self.kwant_task_workers,
         }

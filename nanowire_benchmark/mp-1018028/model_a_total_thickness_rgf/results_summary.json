@@ -1,0 +1,230 @@
+{
+  "row_count": 25,
+  "rows": [
+    {
+      "tag": "t01_m0p2",
+      "thickness_uc": 1,
+      "energy_ev": -0.2,
+      "transmission_e2_over_h": 0.02284005328030027,
+      "wall_seconds": 2.728116,
+      "effective_thread_count": 49.985629,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t01_m0p1",
+      "thickness_uc": 1,
+      "energy_ev": -0.1,
+      "transmission_e2_over_h": 0.515896001138677,
+      "wall_seconds": 2.767116,
+      "effective_thread_count": 50.287113,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t01_0p0",
+      "thickness_uc": 1,
+      "energy_ev": 0.0,
+      "transmission_e2_over_h": 0.2215836777105759,
+      "wall_seconds": 2.769711,
+      "effective_thread_count": 50.261809,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t01_0p1",
+      "thickness_uc": 1,
+      "energy_ev": 0.1,
+      "transmission_e2_over_h": 0.68791883361496,
+      "wall_seconds": 2.789014,
+      "effective_thread_count": 50.160098,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t01_0p2",
+      "thickness_uc": 1,
+      "energy_ev": 0.2,
+      "transmission_e2_over_h": 0.1827186362283914,
+      "wall_seconds": 2.789312,
+      "effective_thread_count": 50.129289,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t02_m0p2",
+      "thickness_uc": 2,
+      "energy_ev": -0.2,
+      "transmission_e2_over_h": 0.852863556523798,
+      "wall_seconds": 9.023513,
+      "effective_thread_count": 57.213289,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t02_m0p1",
+      "thickness_uc": 2,
+      "energy_ev": -0.1,
+      "transmission_e2_over_h": 0.0234515610646679,
+      "wall_seconds": 9.002795,
+      "effective_thread_count": 57.111099,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t02_0p0",
+      "thickness_uc": 2,
+      "energy_ev": 0.0,
+      "transmission_e2_over_h": 0.3977005709809477,
+      "wall_seconds": 8.996688,
+      "effective_thread_count": 57.093711,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t02_0p1",
+      "thickness_uc": 2,
+      "energy_ev": 0.1,
+      "transmission_e2_over_h": 0.5045140377915788,
+      "wall_seconds": 9.165957,
+      "effective_thread_count": 57.245821,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t02_0p2",
+      "thickness_uc": 2,
+      "energy_ev": 0.2,
+      "transmission_e2_over_h": 2.081993734762202,
+      "wall_seconds": 8.926891,
+      "effective_thread_count": 56.974321,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t03_m0p2",
+      "thickness_uc": 3,
+      "energy_ev": -0.2,
+      "transmission_e2_over_h": 0.2697752078589881,
+      "wall_seconds": 24.278072,
+      "effective_thread_count": 53.045941,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t03_m0p1",
+      "thickness_uc": 3,
+      "energy_ev": -0.1,
+      "transmission_e2_over_h": 1.039843184351647,
+      "wall_seconds": 23.854548,
+      "effective_thread_count": 52.954799,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t03_0p0",
+      "thickness_uc": 3,
+      "energy_ev": 0.0,
+      "transmission_e2_over_h": 0.340778326074424,
+      "wall_seconds": 24.189371,
+      "effective_thread_count": 52.94489,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t03_0p1",
+      "thickness_uc": 3,
+      "energy_ev": 0.1,
+      "transmission_e2_over_h": 0.2020737865804954,
+      "wall_seconds": 23.768702,
+      "effective_thread_count": 53.010697,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t03_0p2",
+      "thickness_uc": 3,
+      "energy_ev": 0.2,
+      "transmission_e2_over_h": 0.9442842179917527,
+      "wall_seconds": 23.736259,
+      "effective_thread_count": 53.04075,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t04_m0p2",
+      "thickness_uc": 4,
+      "energy_ev": -0.2,
+      "transmission_e2_over_h": 0.9582102476548803,
+      "wall_seconds": 50.528257,
+      "effective_thread_count": 49.612993,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t04_m0p1",
+      "thickness_uc": 4,
+      "energy_ev": -0.1,
+      "transmission_e2_over_h": 0.743054566208256,
+      "wall_seconds": 50.354711,
+      "effective_thread_count": 49.986098,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t04_0p0",
+      "thickness_uc": 4,
+      "energy_ev": 0.0,
+      "transmission_e2_over_h": 0.3382405945745651,
+      "wall_seconds": 51.439531,
+      "effective_thread_count": 48.649118,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t04_0p1",
+      "thickness_uc": 4,
+      "energy_ev": 0.1,
+      "transmission_e2_over_h": 0.0699750143736133,
+      "wall_seconds": 50.944108,
+      "effective_thread_count": 49.356397,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t04_0p2",
+      "thickness_uc": 4,
+      "energy_ev": 0.2,
+      "transmission_e2_over_h": 0.354669227661612,
+      "wall_seconds": 50.673626,
+      "effective_thread_count": 49.373232,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t05_m0p2",
+      "thickness_uc": 5,
+      "energy_ev": -0.2,
+      "transmission_e2_over_h": 0.9000928717420199,
+      "wall_seconds": 98.348434,
+      "effective_thread_count": 49.688993,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t05_m0p1",
+      "thickness_uc": 5,
+      "energy_ev": -0.1,
+      "transmission_e2_over_h": 0.1180036342934221,
+      "wall_seconds": 95.167519,
+      "effective_thread_count": 50.166619,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t05_0p0",
+      "thickness_uc": 5,
+      "energy_ev": 0.0,
+      "transmission_e2_over_h": 0.4016169335978155,
+      "wall_seconds": 97.282933,
+      "effective_thread_count": 48.664583,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t05_0p1",
+      "thickness_uc": 5,
+      "energy_ev": 0.1,
+      "transmission_e2_over_h": 0.1736005616876538,
+      "wall_seconds": 97.037385,
+      "effective_thread_count": 51.235861,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    },
+    {
+      "tag": "t05_0p2",
+      "thickness_uc": 5,
+      "energy_ev": 0.2,
+      "transmission_e2_over_h": 1.311100554103483,
+      "wall_seconds": 101.857931,
+      "effective_thread_count": 49.936836,
+      "binary_id": "wtec_rgf_runner_phase2_v4"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "hr_dat_path": "/home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_single_t5_rgf/TiS_model_a_c_single_t5_c_canonical_hr.dat",
+  "win_path": "/home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_single_t5_rgf/TiS_model_a_c_single_t5_c_canonical.win",
+  "queue": "g4",
+  "thicknesses": [
+    1
+  ],
+  "disorder_strengths": [
+    0.0
+  ],
+  "n_ensemble": 1,
+  "energy": 0.0,
+  "eta": 1e-06,
+  "mfp_n_layers_z": 1,
+  "mfp_lengths": [],
+  "lead_axis": "x",
+  "thickness_axis": "z",
+  "n_layers_x": 24,
+  "n_layers_y": 5,
+  "transport_engine": "rgf",
+  "transport_rgf_mode": "full_finite",
+  "transport_rgf_periodic_axis": "y",
+  "expected_mpi_np": 1,
+  "progress_file": "progress_t01_0p0.jsonl",
+  "logging_detail": "per_step",
+  "heartbeat_seconds": 20
+}

@@ -36,8 +36,8 @@ ELEMENT_BASIS: dict[str, str] = {
 
 
 PROFILE_ALIASES: dict[str, tuple[str, ...]] = {
-    "tap": ("Ta", "P"),
-    "nbp": ("Nb", "P"),
+    "tap": ("Ta", "P", "Si", "O"),
+    "nbp": ("Nb", "P", "Si", "O"),
     "cosi": ("Co", "Si"),
     "default": ("Ta", "Nb", "Co", "P", "Si", "O"),
 }
@@ -70,4 +70,3 @@ def pao_basis_block(*, profile: str, symbols: Iterable[str]) -> str:
         lines.append(ELEMENT_BASIS[sym].rstrip())
     lines.append("%endblock PAO.Basis")
     return "\n".join(lines)
-

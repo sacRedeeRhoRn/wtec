@@ -1,0 +1,55 @@
+#!/bin/bash
+#PBS -N rgf_tscan
+#PBS -l select=1:ncpus=64:mpiprocs=1:ompthreads=64
+#PBS -l walltime=02:00:00
+
+#PBS -q g4
+#PBS -j oe
+#PBS -o /home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_total_thickness_rgf/rgf_tscan.log
+
+# ── environment ─────────────────────────────────────────────────────────────
+module load QE/7.2
+export OMP_NUM_THREADS=64
+export MKL_NUM_THREADS=64
+export OPENBLAS_NUM_THREADS=64
+export NUMEXPR_NUM_THREADS=64
+export OMP_DYNAMIC=FALSE
+export MKL_DYNAMIC=FALSE
+export OMP_PROC_BIND=spread
+export OMP_PLACES=cores
+export PYTHONUNBUFFERED=1
+
+# ── working directory ────────────────────────────────────────────────────────
+set -euo pipefail
+cd /home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_total_thickness_rgf
+exec > >(tee -a /home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_total_thickness_rgf/wtec_job.log) 2>&1
+echo "[wtec][runtime] start $(date -Is)"
+
+# ── commands ─────────────────────────────────────────────────────────────────
+# IMPORTANT: all parallel execution uses mpirun backend.
+# Fork-based launchstyle is FORBIDDEN in this package.
+echo "[rgf-tscan] start t01_m0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t01_m0p2.json raw_t01_m0p2.json && echo "[rgf-tscan] done t01_m0p2 $(date -Is)"
+echo "[rgf-tscan] start t01_m0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t01_m0p1.json raw_t01_m0p1.json && echo "[rgf-tscan] done t01_m0p1 $(date -Is)"
+echo "[rgf-tscan] start t01_0p0 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t01_0p0.json raw_t01_0p0.json && echo "[rgf-tscan] done t01_0p0 $(date -Is)"
+echo "[rgf-tscan] start t01_0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t01_0p1.json raw_t01_0p1.json && echo "[rgf-tscan] done t01_0p1 $(date -Is)"
+echo "[rgf-tscan] start t01_0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t01_0p2.json raw_t01_0p2.json && echo "[rgf-tscan] done t01_0p2 $(date -Is)"
+echo "[rgf-tscan] start t02_m0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t02_m0p2.json raw_t02_m0p2.json && echo "[rgf-tscan] done t02_m0p2 $(date -Is)"
+echo "[rgf-tscan] start t02_m0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t02_m0p1.json raw_t02_m0p1.json && echo "[rgf-tscan] done t02_m0p1 $(date -Is)"
+echo "[rgf-tscan] start t02_0p0 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t02_0p0.json raw_t02_0p0.json && echo "[rgf-tscan] done t02_0p0 $(date -Is)"
+echo "[rgf-tscan] start t02_0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t02_0p1.json raw_t02_0p1.json && echo "[rgf-tscan] done t02_0p1 $(date -Is)"
+echo "[rgf-tscan] start t02_0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t02_0p2.json raw_t02_0p2.json && echo "[rgf-tscan] done t02_0p2 $(date -Is)"
+echo "[rgf-tscan] start t03_m0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t03_m0p2.json raw_t03_m0p2.json && echo "[rgf-tscan] done t03_m0p2 $(date -Is)"
+echo "[rgf-tscan] start t03_m0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t03_m0p1.json raw_t03_m0p1.json && echo "[rgf-tscan] done t03_m0p1 $(date -Is)"
+echo "[rgf-tscan] start t03_0p0 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t03_0p0.json raw_t03_0p0.json && echo "[rgf-tscan] done t03_0p0 $(date -Is)"
+echo "[rgf-tscan] start t03_0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t03_0p1.json raw_t03_0p1.json && echo "[rgf-tscan] done t03_0p1 $(date -Is)"
+echo "[rgf-tscan] start t03_0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t03_0p2.json raw_t03_0p2.json && echo "[rgf-tscan] done t03_0p2 $(date -Is)"
+echo "[rgf-tscan] start t04_m0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t04_m0p2.json raw_t04_m0p2.json && echo "[rgf-tscan] done t04_m0p2 $(date -Is)"
+echo "[rgf-tscan] start t04_m0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t04_m0p1.json raw_t04_m0p1.json && echo "[rgf-tscan] done t04_m0p1 $(date -Is)"
+echo "[rgf-tscan] start t04_0p0 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t04_0p0.json raw_t04_0p0.json && echo "[rgf-tscan] done t04_0p0 $(date -Is)"
+echo "[rgf-tscan] start t04_0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t04_0p1.json raw_t04_0p1.json && echo "[rgf-tscan] done t04_0p1 $(date -Is)"
+echo "[rgf-tscan] start t04_0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t04_0p2.json raw_t04_0p2.json && echo "[rgf-tscan] done t04_0p2 $(date -Is)"
+echo "[rgf-tscan] start t05_m0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t05_m0p2.json raw_t05_m0p2.json && echo "[rgf-tscan] done t05_m0p2 $(date -Is)"
+echo "[rgf-tscan] start t05_m0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t05_m0p1.json raw_t05_m0p1.json && echo "[rgf-tscan] done t05_m0p1 $(date -Is)"
+echo "[rgf-tscan] start t05_0p0 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t05_0p0.json raw_t05_0p0.json && echo "[rgf-tscan] done t05_0p0 $(date -Is)"
+echo "[rgf-tscan] start t05_0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t05_0p1.json raw_t05_0p1.json && echo "[rgf-tscan] done t05_0p1 $(date -Is)"
+echo "[rgf-tscan] start t05_0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/electroics/wtec/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner  payload_t05_0p2.json raw_t05_0p2.json && echo "[rgf-tscan] done t05_0p2 $(date -Is)"

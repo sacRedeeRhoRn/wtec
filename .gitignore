@@ -30,3 +30,9 @@ benchmarks/
 # Logs and temp
 *.log
 =0.43
+.devise/runtime.json
+.devise/artifacts/
+.devise/controller.log
+.devise/watch-events.jsonl
+
+nanowire_benchmark/mp-1018028/model_a_single_t5_rgf/TiS_model_a_c_single_t5_c_canonical_hr.dat

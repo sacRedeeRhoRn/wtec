@@ -35,3 +35,18 @@ def test_generate_win_includes_kmesh_controls() -> None:
     assert "kmesh_tol = 0.01" in txt
     assert "dis_num_iter  = 1000" in txt
     assert "num_iter      = 1000" in txt
+
+
+def test_generate_win_can_emit_restart_and_ws_distance_tol() -> None:
+    txt = generate_win(
+        _tap_like_atoms(),
+        "TaP",
+        num_bands=52,
+        fermi_energy=15.98,
+        kpoints=(12, 12, 12),
+        spinors=True,
+        restart="wannierise",
+        ws_distance_tol=1.0e-3,
+    )
+    assert "restart = wannierise" in txt
+    assert "ws_distance_tol = 0.001" in txt

@@ -225,6 +225,129 @@ class WannierTBModel:
 
         return sys
 
+    def to_kwant_builder_periodic_y(
+        self,
+        *,
+        ky_frac: float,
+        n_layers_z: int,
+        n_layers_x: int = 1,
+        lead_axis: str = "x",
+        substrate_onsite_eV: float = 0.0,
+    ):
+        """Build a Kwant system reduced by an exact Fourier transform along y.
+
+        This is intended for pristine clean transport with periodic transverse
+        boundary conditions along y. The returned system is finite in x and z and
+        semi-infinite along the selected lead axis. Current production support is
+        limited to in-plane transport along x.
+        """
+        try:
+            import kwant
+        except ImportError:
+            raise ImportError(
+                "kwant is required. Install it from source: "
+                "pip install -e /path/to/kwant"
+            )
+
+        axis_key = str(lead_axis).lower().strip()
+        if axis_key != "x":
+            raise NotImplementedError(
+                "Periodic-y clean transport is currently implemented only for lead_axis='x'."
+            )
+        if int(n_layers_x) <= 0 or int(n_layers_z) <= 0:
+            raise ValueError("n_layers_x and n_layers_z must be > 0")
+
+        shape_xz = (int(n_layers_x), int(n_layers_z))
+        required_axis_cells = self.required_lead_axis_cells(
+            lead_axis="x",
+            n_layers_x=shape_xz[0],
+            n_layers_y=1,
+            n_layers_z=shape_xz[1],
+            periodic_axes=("y",),
+        )
+        if shape_xz[0] < required_axis_cells:
+            raise ValueError(
+                f"x-axis cells={shape_xz[0]} is too small for this periodic-y Wannier Hamiltonian "
+                f"(required >= {required_axis_cells} for lead_axis='x')."
+            )
+
+        nw = self._num_orbs
+        ky = float(np.mod(float(ky_frac), 1.0))
+        two_pi = 2.0 * np.pi
+
+        lat = kwant.lattice.general(
+            [self.lattice_vectors[0], self.lattice_vectors[2]],
+            norbs=nw,
+        )
+
+        def _phase(ry: int) -> complex:
+            return np.exp(1j * two_pi * ky * float(int(ry)))
+
+        h0 = np.zeros((nw, nw), dtype=complex)
+        hoppings_2d: dict[tuple[int, int], np.ndarray] = {}
+        for rx, ry, rz, mat in self._iter_hoppings():
+            phased = _phase(ry) * np.asarray(mat, dtype=complex)
+            if int(rx) == 0 and int(rz) == 0:
+                h0 += phased
+            else:
+                key = (int(rx), int(rz))
+                hoppings_2d[key] = hoppings_2d.get(key, np.zeros((nw, nw), dtype=complex)) + phased
+
+        h0 = 0.5 * (h0 + h0.conj().T)
+        for (rx, rz), mat in list(hoppings_2d.items()):
+            inv_key = (-int(rx), -int(rz))
+            inv_mat = hoppings_2d.get(inv_key)
+            if inv_mat is None:
+                hoppings_2d[inv_key] = np.asarray(mat, dtype=complex).conj().T
+                continue
+            sym_mat = 0.5 * (np.asarray(mat, dtype=complex) + np.asarray(inv_mat, dtype=complex).conj().T)
+            hoppings_2d[(int(rx), int(rz))] = sym_mat
+            hoppings_2d[inv_key] = sym_mat.conj().T
+
+        sys = kwant.Builder()
+        nx, nz = shape_xz
+        for ix in range(nx):
+            for iz in range(nz):
+                sys[lat(ix, iz)] = h0
+
+        for (rx, rz), mat in hoppings_2d.items():
+            if int(rx) < 0 or (int(rx) == 0 and int(rz) < 0):
+                continue
+            for ix in range(nx):
+                ix2 = ix + int(rx)
+                if not (0 <= ix2 < nx):
+                    continue
+                for iz in range(nz):
+                    iz2 = iz + int(rz)
+                    if 0 <= iz2 < nz:
+                        try:
+                            sys[lat(ix, iz), lat(ix2, iz2)] = mat
+                        except Exception:
+                            pass
+
+        lead = kwant.Builder(kwant.TranslationalSymmetry(self.lattice_vectors[0]))
+        onsite_lead = h0 + np.eye(nw, dtype=complex) * float(substrate_onsite_eV)
+        for iz in range(nz):
+            lead[lat(0, iz)] = onsite_lead
+
+        for (rx, rz), mat in hoppings_2d.items():
+            if int(rx) < 0:
+                continue
+            if int(rx) == 0 and int(rz) < 0:
+                continue
+            for iz in range(nz):
+                iz2 = iz + int(rz)
+                if not (0 <= iz2 < nz):
+                    continue
+                try:
+                    lead[lat(0, iz), lat(int(rx), iz2)] = mat
+                except Exception:
+                    pass
+
+        sys.attach_lead(lead)
+        sys.attach_lead(lead.reversed())
+        return sys
+
     def required_lead_axis_cells(
         self,
         *,
@@ -232,6 +355,7 @@ class WannierTBModel:
         n_layers_x: int,
         n_layers_y: int,
         n_layers_z: int,
+        periodic_axes: tuple[str, ...] = (),
     ) -> int:
         """Return minimal finite-cell count along lead axis for stable lead attachment.
 
@@ -243,12 +367,23 @@ class WannierTBModel:
         if axis_key not in axis_map:
             raise ValueError(f"lead_axis must be one of ['x', 'y', 'z'], got {lead_axis!r}")
 
+        periodic_axis_set = set()
+        for ax in periodic_axes:
+            ax_key = str(ax).lower().strip()
+            if ax_key not in axis_map:
+                raise ValueError(f"periodic axis must be one of ['x', 'y', 'z'], got {ax!r}")
+            periodic_axis_set.add(ax_key)
+
         shape = [int(n_layers_x), int(n_layers_y), int(n_layers_z)]
         if any(v <= 0 for v in shape):
             raise ValueError("n_layers_x, n_layers_y and n_layers_z must be > 0")
 
         lead_axis_idx = axis_map[axis_key]
-        finite_axes = [ax for ax in (0, 1, 2) if ax != lead_axis_idx]
+        finite_axes = [
+            ax
+            for ax in (0, 1, 2)
+            if ax != lead_axis_idx and ("xyz"[ax] not in periodic_axis_set)
+        ]
 
         max_abs_span = 0
         for rx, ry, rz, _ in self._iter_hoppings():

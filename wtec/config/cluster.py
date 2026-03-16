@@ -28,6 +28,7 @@ class ClusterConfig:
     )
     qe_pseudo_dir: str = "/pseudo"
     siesta_pseudo_dir: str = "/pseudo"
+    siesta_soc_pseudo_dir: str | None = None
     vasp_pseudo_dir: str = "/pseudo"
     abacus_pseudo_dir: str = "/pseudo"
     abacus_orbital_dir: str = "/orbital"
@@ -72,6 +73,21 @@ class ClusterConfig:
         if ql in self.mpi_cores_by_queue:
             return self.mpi_cores_by_queue[ql]
         return self.mpi_cores
+
+    def resolved_siesta_pseudo_dir(
+        self,
+        *,
+        spin_orbit: bool = False,
+        explicit: str | None = None,
+    ) -> str:
+        explicit_val = str(explicit or "").strip()
+        if explicit_val:
+            return explicit_val
+        if spin_orbit:
+            soc_dir = str(self.siesta_soc_pseudo_dir or "").strip()
+            if soc_dir:
+                return soc_dir
+        return self.siesta_pseudo_dir
 
     @classmethod
     def from_env(cls) -> "ClusterConfig":
@@ -127,6 +143,7 @@ class ClusterConfig:
             pbs_queue_priority=queue_priority,
             qe_pseudo_dir=os.environ.get("TOPOSLAB_QE_PSEUDO_DIR", "/pseudo"),
             siesta_pseudo_dir=os.environ.get("TOPOSLAB_SIESTA_PSEUDO_DIR", "/pseudo"),
+            siesta_soc_pseudo_dir=os.environ.get("TOPOSLAB_SIESTA_SOC_PSEUDO_DIR") or None,
             vasp_pseudo_dir=os.environ.get("TOPOSLAB_VASP_PSEUDO_DIR", "/pseudo"),
             abacus_pseudo_dir=os.environ.get("TOPOSLAB_ABACUS_PSEUDO_DIR", "/pseudo"),
             abacus_orbital_dir=os.environ.get("TOPOSLAB_ABACUS_ORBITAL_DIR", "/orbital"),

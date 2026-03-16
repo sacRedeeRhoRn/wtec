@@ -92,6 +92,64 @@ def _kwant_solver_status() -> dict[str, Any]:
     return status
 
 
+def _current_default_solver_options() -> dict[str, Any] | None:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import kwant.solvers.default as _default
+        inst = getattr(_default, "hidden_instance", None)
+        if inst is None:
+            return None
+        return {
+            "nrhs": getattr(inst, "nrhs", None),
+            "ordering": getattr(inst, "ordering", None),
+            "sparse_rhs": getattr(inst, "sparse_rhs", None),
+        }
+    except Exception:
+        return None
+
+
+def _configure_default_mumps_solver(
+    payload: dict[str, Any],
+    *,
+    solver_status: dict[str, Any],
+    expected_threads: int,
+) -> dict[str, Any] | None:
+    if not bool(solver_status.get("mumps_available")):
+        return None
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            import kwant.solvers.default as _default
+    except Exception:
+        return None
+
+    inst = getattr(_default, "hidden_instance", None)
+    if inst is None or not hasattr(inst, "options"):
+        return None
+
+    configured_nrhs = payload.get("mumps_nrhs")
+    if configured_nrhs is None:
+        configured_nrhs = min(10, max(6, int(expected_threads or 1) // 8))
+    nrhs = int(configured_nrhs) if configured_nrhs else None
+    ordering_raw = payload.get("mumps_ordering")
+    ordering = str(ordering_raw).strip() if ordering_raw else None
+    sparse_rhs = payload.get("mumps_sparse_rhs")
+    if sparse_rhs is not None:
+        sparse_rhs = bool(sparse_rhs)
+
+    before = _current_default_solver_options()
+    inst.options(nrhs=nrhs, ordering=ordering, sparse_rhs=sparse_rhs)
+    after = _current_default_solver_options()
+    if after is None:
+        return None
+    return {
+        "before": before,
+        "after": after,
+        "auto_nrhs_applied": payload.get("mumps_nrhs") is None,
+    }
+
+
 class _ProgressLogger:
     def __init__(self, path: Path | None, *, detail: str = "minimal") -> None:
         self.path = path
@@ -161,8 +219,14 @@ def main(argv: list[str] | None = None) -> int:
     env_threads_i = int(env_threads) if (env_threads and env_threads.isdigit()) else None
     expected_mpi_np = int(payload.get("expected_mpi_np", 0) or 0)
     expected_threads = int(payload.get("expected_threads", 0) or 0)
+    transport_engine = str(payload.get("transport_engine", "kwant")).strip().lower() or "kwant"
     require_mumps = bool(payload.get("require_mumps", False))
     solver_status = _kwant_solver_status()
+    applied_solver_options = _configure_default_mumps_solver(
+        payload,
+        solver_status=solver_status,
+        expected_threads=expected_threads,
+    )
 
     logger.emit(
         "worker_start",
@@ -173,9 +237,22 @@ def main(argv: list[str] | None = None) -> int:
         omp_num_threads=env_threads_i,
         expected_mpi_np=(expected_mpi_np if expected_mpi_np > 0 else None),
         expected_threads=(expected_threads if expected_threads > 0 else None),
+        transport_engine=transport_engine,
         solver=solver_status.get("solver"),
         mumps_available=bool(solver_status.get("mumps_available")),
+        solver_options=applied_solver_options,
     )
+
+    if transport_engine != "kwant":
+        logger.emit(
+            "worker_failed",
+            reason=f"unsupported_transport_engine:{transport_engine}",
+        )
+        print(
+            f"Transport worker failed: unsupported transport_engine={transport_engine!r}.",
+            file=sys.stderr,
+        )
+        return 1
 
     if expected_mpi_np > 0 and size != expected_mpi_np:
         logger.emit(
@@ -252,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
             progress_callback=logger.emit,
             log_detail=log_detail,
             heartbeat_seconds=heartbeat_seconds,
+            transport_engine=transport_engine,
             kwant_mode=str(payload.get("kwant_mode", "auto")),
             kwant_task_workers=int(payload.get("kwant_task_workers", 0)),
         )
@@ -275,8 +353,10 @@ def main(argv: list[str] | None = None) -> int:
         "omp_num_threads": env_threads_i,
         "expected_mpi_np": (expected_mpi_np if expected_mpi_np > 0 else None),
         "expected_threads": (expected_threads if expected_threads > 0 else None),
+        "transport_engine": transport_engine,
         "solver": solver_status.get("solver"),
         "mumps_available": bool(solver_status.get("mumps_available")),
+        "solver_options": applied_solver_options,
         "kwant_mode": str(payload.get("kwant_mode", "auto")),
         "kwant_task_workers": int(payload.get("kwant_task_workers", 0)),
         **_runtime_stats(),

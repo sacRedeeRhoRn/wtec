@@ -245,6 +245,7 @@ def build_delta_h_artifact(
     fit_window_ev: float = 1.5,
     fit_kmesh: tuple[int, int, int] = (8, 8, 8),
     alpha_grid: np.ndarray | None = None,
+    anchor_species_counts: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     pes_hr = Path(pes_hr_dat_path).expanduser().resolve()
     lc_hr = Path(lcao_hr_dat_path).expanduser().resolve()
@@ -348,6 +349,11 @@ def build_delta_h_artifact(
                 "projection_schema": pes_meta.get("projection_schema"),
                 "projection_hash": pes_meta.get("projection_hash"),
             },
+            "transport_species_counts": (
+                {str(k): int(v) for k, v in anchor_species_counts.items()}
+                if isinstance(anchor_species_counts, dict)
+                else None
+            ),
         },
         "delta_h": {
             "r_vectors": [[int(v) for v in r] for r in selected],

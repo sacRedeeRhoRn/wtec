@@ -35,6 +35,8 @@ def generate_win(
     spinors: bool = True,
     search_shells: int = 300,
     kmesh_tol: float = 1.0e-2,
+    restart: str | None = None,
+    ws_distance_tol: float | None = None,
     custom_projections: list[str] | None = None,
     outfile: str | Path | None = None,
 ) -> str:
@@ -87,9 +89,19 @@ def generate_win(
 
     spinors_line = "spinors = .true." if spinors else "spinors = .false."
 
+    restart_line = f"restart = {str(restart).strip()}" if restart else ""
+    ws_distance_tol_line = (
+        f"ws_distance_tol = {float(ws_distance_tol):.8g}" if ws_distance_tol is not None else ""
+    )
+
+    optional_lines = "\n".join(line for line in (restart_line, ws_distance_tol_line) if line)
+    if optional_lines:
+        optional_lines += "\n"
+
     text = f"""num_wann = {num_wann}
 num_bands = {num_bands}
 {spinors_line}
+{optional_lines}
 
 dis_win_max  = {fermi_energy + dis_win[1]:.4f}
 dis_win_min  = {fermi_energy + dis_win[0]:.4f}

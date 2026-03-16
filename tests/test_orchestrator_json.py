@@ -1003,11 +1003,16 @@ def test_stage_transport_rgf_qsub_full_finite_internal_kwant_exact_sigma_stages_
     assert captured["payload"]["eta"] == 1.0e-8
     written = json.loads((Path(cfg["run_dir"]) / "transport" / "primary" / "transport_result.json").read_text())
     assert written["runtime_cert"]["full_finite_sigma_source"] == "kwant_exact"
+    assert written["transport_results"]["meta"]["rgf_attempt_pruned_artifacts"] == [
+        "sigma_left.bin",
+        "sigma_right.bin",
+    ]
     attempt_dir = Path(meta["attempt_dir"])
     assert attempt_dir.is_dir()
+    assert meta["attempt_pruned_artifacts"] == ["sigma_left.bin", "sigma_right.bin"]
     assert (attempt_dir / "sigma_manifest.json").exists()
-    assert (attempt_dir / "sigma_left.bin").exists()
-    assert (attempt_dir / "sigma_right.bin").exists()
+    assert not (attempt_dir / "sigma_left.bin").exists()
+    assert not (attempt_dir / "sigma_right.bin").exists()
 
 
 def test_stage_transport_rgf_qsub_caps_single_point_threads_without_threaded_backend(tmp_path, monkeypatch) -> None:

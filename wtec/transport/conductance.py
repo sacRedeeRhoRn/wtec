@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
+import time
 from typing import Any, Callable
 
 import numpy as np
@@ -18,20 +19,46 @@ from wtec.transport.geometry import region_geometry
 _CLEAN_FSYS_CACHE: OrderedDict[tuple, Any] = OrderedDict()
 _CLEAN_FSYS_CACHE_LOCK = Lock()
 _CLEAN_FSYS_CACHE_MAX = 24
+_PERIODIC_Y_FSYS_CACHE: OrderedDict[tuple, Any] = OrderedDict()
+_PERIODIC_Y_FSYS_CACHE_LOCK = Lock()
+_PERIODIC_Y_FSYS_CACHE_MAX = 256
 
 
-def _required_lead_axis_cells(tb_model, *, counts: dict[str, int], lead_axis: str) -> int:
+def _kwant_mode_key(kwant_mode: str | None) -> str:
+    return str(kwant_mode or "auto").strip().lower() or "auto"
+
+
+def _uses_periodic_y_mode(kwant_mode: str | None) -> bool:
+    return _kwant_mode_key(kwant_mode) in {"periodic_y", "periodic_clean_y"}
+
+
+def _required_lead_axis_cells(
+    tb_model,
+    *,
+    counts: dict[str, int],
+    lead_axis: str,
+    periodic_axes: tuple[str, ...] = (),
+) -> int:
     """Best-effort lead-axis minimum inferred from the TB model."""
     fn = getattr(tb_model, "required_lead_axis_cells", None)
     if callable(fn):
-        return int(
-            fn(
-                lead_axis=str(lead_axis),
-                n_layers_x=int(counts["x"]),
-                n_layers_y=int(counts["y"]),
-                n_layers_z=int(counts["z"]),
+        kwargs = {
+            "lead_axis": str(lead_axis),
+            "n_layers_x": int(counts["x"]),
+            "n_layers_y": int(counts["y"]),
+            "n_layers_z": int(counts["z"]),
+        }
+        if periodic_axes:
+            kwargs["periodic_axes"] = tuple(periodic_axes)
+        try:
+            return int(
+                fn(
+                    **kwargs,
+                )
             )
-        )
+        except TypeError:
+            kwargs.pop("periodic_axes", None)
+            return int(fn(**kwargs))
     return 2
 
 
@@ -58,6 +85,25 @@ def _clean_fsys_cache_key(
         int(id(tb_model)),
         int(n_layers_x),
         int(n_layers_y),
+        int(n_layers_z),
+        str(lead_axis),
+        float(lead_onsite_eV),
+    )
+
+
+def _periodic_y_fsys_cache_key(
+    tb_model,
+    *,
+    ky_frac: float,
+    n_layers_x: int,
+    n_layers_z: int,
+    lead_axis: str,
+    lead_onsite_eV: float,
+) -> tuple:
+    return (
+        int(id(tb_model)),
+        round(float(ky_frac) % 1.0, 12),
+        int(n_layers_x),
         int(n_layers_z),
         str(lead_axis),
         float(lead_onsite_eV),
@@ -104,6 +150,123 @@ def _get_or_build_clean_fsys(
     return fsys
 
 
+def _get_or_build_periodic_y_fsys(
+    tb_model,
+    *,
+    ky_frac: float,
+    n_layers_x: int,
+    n_layers_z: int,
+    lead_axis: str,
+    lead_onsite_eV: float,
+):
+    key = _periodic_y_fsys_cache_key(
+        tb_model,
+        ky_frac=ky_frac,
+        n_layers_x=n_layers_x,
+        n_layers_z=n_layers_z,
+        lead_axis=lead_axis,
+        lead_onsite_eV=lead_onsite_eV,
+    )
+    with _PERIODIC_Y_FSYS_CACHE_LOCK:
+        cached = _PERIODIC_Y_FSYS_CACHE.get(key)
+        if cached is not None:
+            _PERIODIC_Y_FSYS_CACHE.move_to_end(key, last=True)
+            return cached
+
+    sys = tb_model.to_kwant_builder_periodic_y(
+        ky_frac=ky_frac,
+        n_layers_z=n_layers_z,
+        n_layers_x=n_layers_x,
+        lead_axis=lead_axis,
+        substrate_onsite_eV=lead_onsite_eV,
+    )
+    fsys = sys.finalized()
+
+    with _PERIODIC_Y_FSYS_CACHE_LOCK:
+        _PERIODIC_Y_FSYS_CACHE[key] = fsys
+        _PERIODIC_Y_FSYS_CACHE.move_to_end(key, last=True)
+        while len(_PERIODIC_Y_FSYS_CACHE) > _PERIODIC_Y_FSYS_CACHE_MAX:
+            _PERIODIC_Y_FSYS_CACHE.popitem(last=False)
+    return fsys
+
+
+def _periodic_y_kfractions(n_layers_y: int) -> tuple[float, ...]:
+    nky = int(n_layers_y)
+    if nky <= 0:
+        raise ValueError("n_layers_y must be > 0 for periodic_y transport mode.")
+    return tuple(float(i) / float(nky) for i in range(nky))
+
+
+def _validate_periodic_y_mode(
+    *,
+    kwant_mode: str,
+    lead_axis: str,
+    thickness_axis: str | None = None,
+    disorder_strength: float = 0.0,
+    surface_disorder_strength: float = 0.0,
+) -> None:
+    if not _uses_periodic_y_mode(kwant_mode):
+        return
+    if str(lead_axis).lower().strip() != "x":
+        raise ValueError("transport_kwant_mode='periodic_y' currently requires lead_axis='x'.")
+    if thickness_axis is not None and str(thickness_axis).lower().strip() == "y":
+        raise ValueError(
+            "transport_kwant_mode='periodic_y' is incompatible with thickness_axis='y'."
+        )
+    if float(disorder_strength) != 0.0 or float(surface_disorder_strength) != 0.0:
+        raise ValueError(
+            "transport_kwant_mode='periodic_y' is valid only for clean periodic transport "
+            "(disorder_strength=0 and surface_disorder_strength=0)."
+        )
+
+
+def _clean_conductance_scalar(
+    *,
+    tb_model,
+    n_layers_x: int,
+    n_layers_y: int,
+    n_layers_z: int,
+    lead_axis: str,
+    energy: float,
+    seed: int,
+    lead_onsite_eV: float,
+    n_surface_layers: int,
+    progress_cb: Callable[..., None] | None = None,
+    progress_context: dict[str, Any] | None = None,
+    kwant_mode: str = "auto",
+) -> float:
+    mode = _kwant_mode_key(kwant_mode)
+    if _uses_periodic_y_mode(mode):
+        return _single_conductance_periodic_y(
+            tb_model=tb_model,
+            n_layers_x=n_layers_x,
+            n_layers_y=n_layers_y,
+            n_layers_z=n_layers_z,
+            lead_axis=lead_axis,
+            energy=energy,
+            lead_onsite_eV=lead_onsite_eV,
+            use_clean_cache=True,
+            progress_cb=progress_cb,
+            progress_context=progress_context,
+        )
+    return _single_conductance(
+        tb_model=tb_model,
+        n_layers_x=n_layers_x,
+        n_layers_y=n_layers_y,
+        n_layers_z=n_layers_z,
+        lead_axis=lead_axis,
+        disorder_strength=0.0,
+        energy=energy,
+        seed=seed,
+        lead_onsite_eV=lead_onsite_eV,
+        surface_disorder_strength=0.0,
+        n_surface_layers=n_surface_layers,
+        use_clean_cache=True,
+        progress_cb=progress_cb,
+        progress_context=progress_context,
+    )
+
+
 def compute_conductance_vs_thickness(
     tb_model,
     thicknesses: list[int] | np.ndarray,
@@ -148,6 +311,13 @@ def compute_conductance_vs_thickness(
         raise ValueError(
             f"thickness_axis must be one of {sorted(valid_axes)}, got {thickness_axis!r}"
         )
+    _validate_periodic_y_mode(
+        kwant_mode=kwant_mode,
+        lead_axis=lead_axis,
+        thickness_axis=thickness_axis,
+        disorder_strength=disorder_strength,
+        surface_disorder_strength=surface_disorder_strength,
+    )
 
     thicknesses = np.asarray(thicknesses, dtype=int)
     if np.any(thicknesses <= 0):
@@ -166,12 +336,18 @@ def compute_conductance_vs_thickness(
 
     requested_lead_cells = int(base_counts[lead_axis])
     required_lead_cells = requested_lead_cells
+    periodic_axes = ("y",) if _uses_periodic_y_mode(kwant_mode) else ()
     for d in thicknesses:
         counts_probe = dict(base_counts)
         counts_probe[thickness_axis] = int(d)
         required_lead_cells = max(
             required_lead_cells,
-            _required_lead_axis_cells(tb_model, counts=counts_probe, lead_axis=lead_axis),
+            _required_lead_axis_cells(
+                tb_model,
+                counts=counts_probe,
+                lead_axis=lead_axis,
+                periodic_axes=periodic_axes,
+            ),
         )
 
     G_means: list[float] = []
@@ -195,6 +371,7 @@ def compute_conductance_vs_thickness(
         and float(disorder_strength) == 0.0
         and float(surface_disorder_strength) == 0.0
         and int(len(thicknesses)) > 1
+        and not _uses_periodic_y_mode(kwant_mode)
     )
 
     def _eval_thickness_point(thickness_uc: int) -> tuple[dict[str, int], float, float]:
@@ -209,19 +386,25 @@ def compute_conductance_vs_thickness(
             raise ValueError(f"Invalid layer counts for d={thickness_uc}: {counts}")
 
         if parallel_clean_points:
-            g_scalar = _single_conductance(
+            g_scalar = _clean_conductance_scalar(
                 tb_model=tb_model,
                 n_layers_x=counts["x"],
                 n_layers_y=counts["y"],
                 n_layers_z=counts["z"],
                 lead_axis=lead_axis,
-                disorder_strength=0.0,
                 energy=energy,
                 seed=int(base_seed),
                 lead_onsite_eV=lead_onsite_eV,
-                surface_disorder_strength=0.0,
                 n_surface_layers=n_surface_layers,
-                use_clean_cache=True,
+                progress_cb=progress_cb,
+                progress_context={
+                    "scan": "thickness",
+                    "disorder_strength": float(disorder_strength),
+                    "thickness_uc": int(counts[thickness_axis]),
+                    "ensemble_index": 0,
+                    "seed": int(base_seed),
+                },
+                kwant_mode=kwant_mode,
             )
             return counts, float(g_scalar), 0.0
 
@@ -359,6 +542,7 @@ def compute_conductance_vs_length(
     heartbeat_seconds: int = 20,
     kwant_mode: str = "auto",
     task_workers: int = 0,
+    n_surface_layers: int = 2,
 ) -> dict:
     """Compute G(L) for MFP extraction.
 
@@ -373,6 +557,13 @@ def compute_conductance_vs_length(
         raise ValueError(
             f"thickness_axis must be one of {sorted(valid_axes)}, got {thickness_axis!r}"
         )
+    _validate_periodic_y_mode(
+        kwant_mode=kwant_mode,
+        lead_axis=lead_axis,
+        thickness_axis=thickness_axis,
+        disorder_strength=disorder_strength,
+        surface_disorder_strength=0.0,
+    )
 
     lengths = np.asarray(lengths, dtype=int)
     if np.any(lengths <= 0):
@@ -390,6 +581,7 @@ def compute_conductance_vs_length(
         tb_model,
         counts=base_counts,
         lead_axis=lead_axis,
+        periodic_axes=("y",) if _uses_periodic_y_mode(kwant_mode) else (),
     )
     requested_lengths = lengths.copy()
     lengths_used = lengths.copy()
@@ -411,6 +603,7 @@ def compute_conductance_vs_length(
         and int(n_ensemble) <= 1
         and float(disorder_strength) == 0.0
         and int(len(lengths_used)) > 1
+        and not _uses_periodic_y_mode(kwant_mode)
     )
 
     def _eval_length_point(length_uc: int) -> tuple[int, float, float]:
@@ -418,19 +611,25 @@ def compute_conductance_vs_length(
         counts[lead_axis] = int(length_uc)
 
         if parallel_clean_points:
-            g_scalar = _single_conductance(
+            g_scalar = _clean_conductance_scalar(
                 tb_model=tb_model,
                 n_layers_x=counts["x"],
                 n_layers_y=counts["y"],
                 n_layers_z=counts["z"],
                 lead_axis=lead_axis,
-                disorder_strength=0.0,
                 energy=energy,
                 seed=int(base_seed),
                 lead_onsite_eV=lead_onsite_eV,
-                surface_disorder_strength=0.0,
                 n_surface_layers=n_surface_layers,
-                use_clean_cache=True,
+                progress_cb=progress_cb,
+                progress_context={
+                    "scan": "length",
+                    "disorder_strength": float(disorder_strength),
+                    "length_uc": int(length_uc),
+                    "ensemble_index": 0,
+                    "seed": int(base_seed),
+                },
+                kwant_mode=kwant_mode,
             )
             return int(length_uc), float(g_scalar), 0.0
 
@@ -452,7 +651,7 @@ def compute_conductance_vs_length(
             progress_context={
                 "scan": "length",
                 "disorder_strength": float(disorder_strength),
-                "length_uc": int(L),
+                "length_uc": int(length_uc),
             },
             log_detail=log_detail,
             heartbeat_seconds=heartbeat_seconds,
@@ -551,19 +750,19 @@ def _ensemble_conductance(
     if n_ensemble <= 1 or _no_disorder:
         value = None
         if rank == 0:
-            value = _single_conductance(
+            value = _clean_conductance_scalar(
                 tb_model=tb_model,
                 n_layers_x=n_layers_x,
                 n_layers_y=n_layers_y,
                 n_layers_z=n_layers_z,
                 lead_axis=lead_axis,
-                disorder_strength=0.0,
                 energy=energy,
-                seed=0,
+                seed=int(base_seed),
                 lead_onsite_eV=lead_onsite_eV,
-                surface_disorder_strength=0.0,
                 n_surface_layers=n_surface_layers,
-                use_clean_cache=True,
+                progress_cb=progress_cb,
+                progress_context={**ctx, "ensemble_index": 0, "seed": int(base_seed)},
+                kwant_mode=kwant_mode,
             )
             if emit_samples:
                 _emit_progress(
@@ -600,6 +799,8 @@ def _ensemble_conductance(
             surface_disorder_strength=surface_disorder_strength,
             n_surface_layers=n_surface_layers,
             use_clean_cache=False,
+            progress_cb=progress_cb,
+            progress_context={**ctx, "ensemble_index": int(idx), "seed": int(base_seed + idx)},
         )
         return (idx, float(g))
 
@@ -714,6 +915,106 @@ def _ensemble_conductance(
     return np.array(payload["results"], dtype=float)
 
 
+def _single_conductance_periodic_y(
+    tb_model,
+    n_layers_x: int,
+    n_layers_y: int,
+    n_layers_z: int,
+    lead_axis: str,
+    energy: float,
+    lead_onsite_eV: float,
+    use_clean_cache: bool = False,
+    progress_cb: Callable[..., None] | None = None,
+    progress_context: dict[str, Any] | None = None,
+) -> float:
+    """Compute exact clean conductance with periodic boundary conditions along y."""
+    import kwant
+
+    ctx = dict(progress_context or {})
+    if str(lead_axis).lower().strip() != "x":
+        raise NotImplementedError(
+            "Periodic-y clean transport is currently implemented only for lead_axis='x'."
+        )
+
+    total = 0.0
+    for ky_index, ky_frac in enumerate(_periodic_y_kfractions(n_layers_y)):
+        t_build = time.perf_counter()
+        try:
+            if use_clean_cache:
+                fsys = _get_or_build_periodic_y_fsys(
+                    tb_model,
+                    ky_frac=ky_frac,
+                    n_layers_x=n_layers_x,
+                    n_layers_z=n_layers_z,
+                    lead_axis=lead_axis,
+                    lead_onsite_eV=lead_onsite_eV,
+                )
+            else:
+                sys = tb_model.to_kwant_builder_periodic_y(
+                    ky_frac=ky_frac,
+                    n_layers_z=n_layers_z,
+                    n_layers_x=n_layers_x,
+                    lead_axis=lead_axis,
+                    substrate_onsite_eV=lead_onsite_eV,
+                )
+                fsys = sys.finalized()
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to build/cache periodic-y Kwant transport system. "
+                f"n_layers_x={n_layers_x}, n_layers_y={n_layers_y}, n_layers_z={n_layers_z}, "
+                f"lead_axis={lead_axis}, ky_frac={ky_frac:.6f}. "
+                f"Original error: {type(exc).__name__}: {exc}"
+            ) from exc
+
+        _emit_progress(
+            progress_cb,
+            "single_conductance_phase",
+            phase="build_or_cache_periodic_y_fsys",
+            elapsed_s=float(time.perf_counter() - t_build),
+            cached=bool(use_clean_cache),
+            ky_index=int(ky_index),
+            ky_frac=float(ky_frac),
+            **ctx,
+        )
+
+        t_solve = time.perf_counter()
+        try:
+            smat = kwant.smatrix(fsys, energy, out_leads=[0], in_leads=[1])
+        except ValueError as exc:
+            raise RuntimeError(
+                "Kwant periodic-y scattering matrix construction failed. "
+                f"energy={energy}, lead_axis={lead_axis}, ky_frac={ky_frac:.6f}. "
+                f"Original error: {type(exc).__name__}: {exc}"
+            ) from exc
+        _emit_progress(
+            progress_cb,
+            "single_conductance_phase",
+            phase="periodic_y_smatrix",
+            elapsed_s=float(time.perf_counter() - t_solve),
+            cached=bool(use_clean_cache),
+            ky_index=int(ky_index),
+            ky_frac=float(ky_frac),
+            **ctx,
+        )
+
+        t_tx = time.perf_counter()
+        g_ky = float(smat.transmission(0, 1))
+        total += g_ky
+        _emit_progress(
+            progress_cb,
+            "single_conductance_phase",
+            phase="periodic_y_transmission",
+            elapsed_s=float(time.perf_counter() - t_tx),
+            cached=bool(use_clean_cache),
+            ky_index=int(ky_index),
+            ky_frac=float(ky_frac),
+            G=float(g_ky),
+            G_total=float(total),
+            **ctx,
+        )
+    return float(total)
+
+
 def _single_conductance(
     tb_model,
     n_layers_x: int,
@@ -727,6 +1028,8 @@ def _single_conductance(
     surface_disorder_strength: float = 0.0,
     n_surface_layers: int = 2,
     use_clean_cache: bool = False,
+    progress_cb: Callable[..., None] | None = None,
+    progress_context: dict[str, Any] | None = None,
 ) -> float:
     """Build, disorder, finalize, and compute G for one configuration.
 
@@ -741,8 +1044,10 @@ def _single_conductance(
     import kwant
     from wtec.transport.disorder import add_anderson_disorder, add_surface_anderson_disorder
 
+    ctx = dict(progress_context or {})
     no_disorder = disorder_strength == 0.0 and surface_disorder_strength == 0.0
     if use_clean_cache and no_disorder:
+        t_build = time.perf_counter()
         try:
             fsys = _get_or_build_clean_fsys(
                 tb_model,
@@ -758,7 +1063,16 @@ def _single_conductance(
                 f"n_layers_x={n_layers_x}, n_layers_y={n_layers_y}, n_layers_z={n_layers_z}, "
                 f"lead_axis={lead_axis}. Original error: {type(exc).__name__}: {exc}"
             ) from exc
+        _emit_progress(
+            progress_cb,
+            "single_conductance_phase",
+            phase="build_or_cache_clean_fsys",
+            elapsed_s=float(time.perf_counter() - t_build),
+            cached=bool(use_clean_cache),
+            **ctx,
+        )
     else:
+        t_build = time.perf_counter()
         try:
             sys = tb_model.to_kwant_builder(
                 n_layers_z=n_layers_z,
@@ -773,9 +1087,18 @@ def _single_conductance(
                 f"n_layers_x={n_layers_x}, n_layers_y={n_layers_y}, n_layers_z={n_layers_z}, "
                 f"lead_axis={lead_axis}. Original error: {type(exc).__name__}: {exc}"
             ) from exc
+        _emit_progress(
+            progress_cb,
+            "single_conductance_phase",
+            phase="builder_construct",
+            elapsed_s=float(time.perf_counter() - t_build),
+            cached=False,
+            **ctx,
+        )
 
         rng = np.random.default_rng(seed)
         if surface_disorder_strength > 0.0:
+            t_dis = time.perf_counter()
             add_surface_anderson_disorder(
                 sys,
                 surface_strength=surface_disorder_strength,
@@ -783,20 +1106,69 @@ def _single_conductance(
                 n_surface_layers=n_surface_layers,
                 rng=rng,
             )
+            _emit_progress(
+                progress_cb,
+                "single_conductance_phase",
+                phase="surface_disorder_apply",
+                elapsed_s=float(time.perf_counter() - t_dis),
+                cached=False,
+                **ctx,
+            )
         elif disorder_strength > 0.0:
+            t_dis = time.perf_counter()
             add_anderson_disorder(sys, disorder_strength, rng=rng)
+            _emit_progress(
+                progress_cb,
+                "single_conductance_phase",
+                phase="bulk_disorder_apply",
+                elapsed_s=float(time.perf_counter() - t_dis),
+                cached=False,
+                **ctx,
+            )
 
+        t_fin = time.perf_counter()
         fsys = sys.finalized()
+        _emit_progress(
+            progress_cb,
+            "single_conductance_phase",
+            phase="finalize",
+            elapsed_s=float(time.perf_counter() - t_fin),
+            cached=False,
+            **ctx,
+        )
+    t_solve = time.perf_counter()
     try:
-        smat = kwant.smatrix(fsys, energy)
+        # Two-terminal transport only needs the left/right transmission block.
+        # Requesting only the relevant leads reduces RHS/kept-variable work
+        # inside Kwant without changing the physical observable.
+        smat = kwant.smatrix(fsys, energy, out_leads=[0], in_leads=[1])
     except ValueError as exc:
         raise RuntimeError(
             "Kwant scattering matrix construction failed. "
             f"energy={energy}, lead_axis={lead_axis}. "
             f"Original error: {type(exc).__name__}: {exc}"
         ) from exc
+    _emit_progress(
+        progress_cb,
+        "single_conductance_phase",
+        phase="smatrix",
+        elapsed_s=float(time.perf_counter() - t_solve),
+        cached=bool(use_clean_cache and no_disorder),
+        **ctx,
+    )
     # Transmission from right lead -> left lead
-    return float(smat.transmission(0, 1))
+    t_tx = time.perf_counter()
+    out = float(smat.transmission(0, 1))
+    _emit_progress(
+        progress_cb,
+        "single_conductance_phase",
+        phase="transmission",
+        elapsed_s=float(time.perf_counter() - t_tx),
+        cached=bool(use_clean_cache and no_disorder),
+        G=out,
+        **ctx,
+    )
+    return out
 
 
 def _mpi_context():

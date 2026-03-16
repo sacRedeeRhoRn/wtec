@@ -1,0 +1,36 @@
+#!/bin/bash
+#PBS -N rgf_t5
+#PBS -l select=1:ncpus=64:mpiprocs=1:ompthreads=64
+#PBS -l walltime=30:00:00
+
+#PBS -q g4
+#PBS -j oe
+#PBS -o /home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_single_t5_rgf/rgf_t5.log
+
+# ── environment ─────────────────────────────────────────────────────────────
+module load QE/7.2
+export OMP_NUM_THREADS=64
+export MKL_NUM_THREADS=64
+export OPENBLAS_NUM_THREADS=64
+export NUMEXPR_NUM_THREADS=64
+export OMP_DYNAMIC=FALSE
+export MKL_DYNAMIC=FALSE
+export OMP_PROC_BIND=spread
+export OMP_PLACES=cores
+export PYTHONUNBUFFERED=1
+export PYTHONUNBUFFERED=1
+
+# ── working directory ────────────────────────────────────────────────────────
+set -euo pipefail
+cd /home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_single_t5_rgf
+exec > >(tee -a /home/msj/Desktop/playground/electroics/wtec/nanowire_benchmark/mp-1018028/model_a_single_t5_rgf/wtec_job.log) 2>&1
+echo "[wtec][runtime] start $(date -Is)"
+
+# ── commands ─────────────────────────────────────────────────────────────────
+# IMPORTANT: all parallel execution uses mpirun backend.
+# Fork-based launchstyle is FORBIDDEN in this package.
+echo "[rgf-onejob] start m0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/CAUTIOUS--test-area--CAUTIOUS/wtec-test/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner payload_m0p2.json raw_m0p2.json && echo "[rgf-onejob] done m0p2 $(date -Is)"
+echo "[rgf-onejob] start m0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/CAUTIOUS--test-area--CAUTIOUS/wtec-test/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner payload_m0p1.json raw_m0p1.json && echo "[rgf-onejob] done m0p1 $(date -Is)"
+echo "[rgf-onejob] start p0p0 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/CAUTIOUS--test-area--CAUTIOUS/wtec-test/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner payload_p0p0.json raw_p0p0.json && echo "[rgf-onejob] done p0p0 $(date -Is)"
+echo "[rgf-onejob] start p0p1 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/CAUTIOUS--test-area--CAUTIOUS/wtec-test/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner payload_p0p1.json raw_p0p1.json && echo "[rgf-onejob] done p0p1 $(date -Is)"
+echo "[rgf-onejob] start p0p2 $(date -Is)" && mpirun -np 1 --bind-to none /home/msj/Desktop/playground/CAUTIOUS--test-area--CAUTIOUS/wtec-test/remote_runs/.wtec_bootstrap/rgf/rgf_scaffold/build/wtec_rgf_runner payload_p0p2.json raw_p0p2.json && echo "[rgf-onejob] done p0p2 $(date -Is)"

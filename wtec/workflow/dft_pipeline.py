@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 import posixpath
 import re
 import shlex
@@ -50,6 +51,7 @@ class DFTPipeline:
         qe_noncolin: bool = True,
         qe_lspinorb: bool = True,
         qe_disable_symmetry: bool = False,
+        custom_projections: list[str] | None = None,
         dispersion_cfg: dict | None = None,
         live_log: bool = False,
         log_poll_interval: int = 30,
@@ -79,6 +81,7 @@ class DFTPipeline:
         self.qe_noncolin = bool(qe_noncolin)
         self.qe_lspinorb = bool(qe_lspinorb)
         self.qe_disable_symmetry = bool(qe_disable_symmetry)
+        self.custom_projections = [str(v) for v in custom_projections] if custom_projections else None
         disp = dispersion_cfg if isinstance(dispersion_cfg, dict) else {}
         method = str(disp.get("method", "d3")).strip().lower() or "d3"
         self.dispersion_enabled = bool(disp.get("enabled", True)) and method != "none"
@@ -229,6 +232,9 @@ class DFTPipeline:
             else self.preset.dis_froz_win
         )
         current_dis_win = dis_win
+        current_restart: str | None = None
+        current_ws_distance_tol: float | None = None
+        restart_only = False
         # Generate initial .win before preflight file checks.
         generate_win(
             self.atoms,
@@ -239,6 +245,9 @@ class DFTPipeline:
             dis_win=current_dis_win,
             dis_froz_win=dis_froz_win,
             spinors=self.qe_noncolin,
+            restart=current_restart,
+            ws_distance_tol=current_ws_distance_tol,
+            custom_projections=self.custom_projections,
             outfile=win_file,
         )
         remote_dir = self._remote_dir()
@@ -255,19 +264,8 @@ class DFTPipeline:
         queue_used = self._resolved_queue_name()
         cores_per_node = self._resolved_cores_per_node()
 
-        script = wannier90_script(
-            self.material,
-            work_dir=remote_dir,
-            n_nodes=self.n_nodes,
-            n_cores_per_node=cores_per_node,
-            walltime=self.walltime_wan,
-            queue=queue_used,
-            modules=self.modules,
-            env_vars=self._runtime_env_vars(),
-        )
-
         attempts = 0
-        max_attempts = 2
+        max_attempts = 3
         while True:
             attempts += 1
             generate_win(
@@ -280,7 +278,21 @@ class DFTPipeline:
                 dis_froz_win=dis_froz_win,
                 # Keep Wannier spinor mode consistent with QE noncollinear/SOC mode.
                 spinors=self.qe_noncolin,
+                restart=current_restart,
+                ws_distance_tol=current_ws_distance_tol,
+                custom_projections=self.custom_projections,
                 outfile=win_file,
+            )
+            script = wannier90_script(
+                self.material,
+                work_dir=remote_dir,
+                n_nodes=self.n_nodes,
+                n_cores_per_node=cores_per_node,
+                walltime=self.walltime_wan,
+                queue=queue_used,
+                modules=self.modules,
+                env_vars=self._runtime_env_vars(),
+                restart_only=restart_only,
             )
             try:
                 meta = self.jm.submit_and_wait(
@@ -292,9 +304,10 @@ class DFTPipeline:
                         f"{self.material}.wout",
                         f"w90_{self.material}.log",
                         f"{self.material}.pw2wan.out",
+                        f"{self.material}.chk",
                     ],
                     script_name=f"wan_{self.material}.pbs",
-                    stage_files=[pw2wan_in, win_file],
+                    stage_files=([win_file] if restart_only else [pw2wan_in, win_file]),
                     expected_local_outputs=[f"{self.material}_hr.dat", f"{self.material}.wout"],
                     queue_used=queue_used,
                     poll_interval=self.log_poll_interval,
@@ -311,7 +324,25 @@ class DFTPipeline:
                 if attempts >= max_attempts:
                     raise
                 if not self._is_wannier_dis_window_failure(remote_dir):
-                    raise
+                    if not self._is_wannier_ws_distance_failure(remote_dir) or not self._has_wannier_restart_artifacts(
+                        remote_dir
+                    ):
+                        raise
+                    default_tol_raw = os.environ.get("TOPOSLAB_WANNIER_WS_DISTANCE_TOL", "1e-3").strip()
+                    try:
+                        current_ws_distance_tol = float(
+                            default_tol_raw if current_ws_distance_tol is None else current_ws_distance_tol * 10.0
+                        )
+                    except Exception:
+                        current_ws_distance_tol = 1.0e-3
+                    current_restart = "wannierise"
+                    restart_only = True
+                    print(
+                        "[DFTPipeline] Wannier ws_distance/postprocessing failure detected; "
+                        f"retrying final wannier90.x from checkpoint with restart={current_restart} "
+                        f"and ws_distance_tol={current_ws_distance_tol:.3g}."
+                    )
+                    continue
                 low, high = float(current_dis_win[0]), float(current_dis_win[1])
                 widened = (min(low, -20.0), max(high, 20.0))
                 if widened == current_dis_win:
@@ -350,6 +381,51 @@ class DFTPipeline:
                 + shlex.quote(needle)
                 + " \"$f\"; then echo yes; exit 0; fi; "
                 "done; echo no"
+            )
+        )
+        rc, stdout, _ = self.jm._ssh.run(cmd, check=False)
+        if rc != 0:
+            return False
+        return stdout.strip().splitlines()[-1:].pop() == "yes"
+
+    def _is_wannier_ws_distance_failure(self, remote_dir: str) -> bool:
+        needle = "wrong irdist_ws"
+        wout = posixpath.join(remote_dir, f"{self.material}.wout")
+        cmd = (
+            "bash -lc "
+            + shlex.quote(
+                "for f in "
+                + shlex.quote(wout)
+                + " "
+                + shlex.quote(posixpath.join(remote_dir, "wtec_job.log"))
+                + "; do "
+                "if [ -f \"$f\" ] && grep -Fq "
+                + shlex.quote(needle)
+                + " \"$f\"; then echo yes; exit 0; fi; "
+                "done; echo no"
+            )
+        )
+        rc, stdout, _ = self.jm._ssh.run(cmd, check=False)
+        if rc != 0:
+            return False
+        return stdout.strip().splitlines()[-1:].pop() == "yes"
+
+    def _has_wannier_restart_artifacts(self, remote_dir: str) -> bool:
+        files = [
+            posixpath.join(remote_dir, f"{self.material}.chk"),
+            posixpath.join(remote_dir, f"{self.material}.amn"),
+            posixpath.join(remote_dir, f"{self.material}.mmn"),
+            posixpath.join(remote_dir, f"{self.material}.eig"),
+        ]
+        cmd = (
+            "bash -lc "
+            + shlex.quote(
+                "missing=0; "
+                + " ".join(
+                    f"[ -s {shlex.quote(path)} ] || missing=1;"
+                    for path in files
+                )
+                + " if [ \"$missing\" -eq 0 ]; then echo yes; else echo no; fi"
             )
         )
         rc, stdout, _ = self.jm._ssh.run(cmd, check=False)
@@ -413,7 +489,10 @@ class DFTPipeline:
         )
 
     def _remote_dir(self) -> str:
-        return f"{self.remote_base}/{self.material}"
+        tail = [part for part in self.run_dir.parts[-2:] if part not in ("", "/", ".")]
+        if not tail:
+            tail = [self.run_dir.name or self.material]
+        return f"{self.remote_base}/{'/'.join(tail)}/{self.material}"
 
     def _resolved_queue_name(self) -> str:
         if self._resolved_queue is None:
@@ -641,9 +720,14 @@ class DFTPipeline:
             env.update(
                 {
                     "OMP_NUM_THREADS": val,
+                    "OMP_DYNAMIC": "FALSE",
+                    "OMP_PLACES": "cores",
+                    "OMP_PROC_BIND": "spread",
                     "MKL_NUM_THREADS": val,
+                    "MKL_DYNAMIC": "FALSE",
                     "OPENBLAS_NUM_THREADS": val,
                     "NUMEXPR_NUM_THREADS": val,
+                    "KMP_AFFINITY": "granularity=fine,scatter",
                 }
             )
         return env

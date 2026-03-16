@@ -25,6 +25,10 @@ PROJECTION_LIBRARY: dict[str, list[str]] = {
         "Ta:d",          # 5 d-orbitals (SOC doubles → 10 WFs)
         "P:p",           # 3 p-orbitals (SOC doubles → 6 WFs)  → 16 WFs total
     ],
+    "TiS": [
+        "Ti:d",          # 5 d-orbitals
+        "S:p",           # 3 p-orbitals  -> 16 WFs total in spinor mode
+    ],
     "NbP": [
         "Nb:d",
         "P:p",

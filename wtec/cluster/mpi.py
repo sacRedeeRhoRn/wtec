@@ -54,7 +54,7 @@ def build_command(
     if mpi is None:
         mpi = MPIConfig()
 
-    bind = f"--bind-to {mpi.bind_to}" if mpi.bind_to != "none" else ""
+    bind = f"--bind-to {mpi.bind_to}"
     prefix = f"mpirun -np {mpi.n_cores} {bind} {mpi.mpirun_opts}".strip()
 
     # QE parallelism flags

@@ -64,14 +64,20 @@ MATERIALS: dict[str, MaterialPreset] = {
         siesta_pseudopots={
             "Ta": "Ta.psml",
             "P": "P.psml",
+            "Si": "Si.psml",
+            "O": "O.psml",
         },
         abacus_pseudopots={
             "Ta": "Ta.upf",
             "P": "P.upf",
+            "Si": "Si.upf",
+            "O": "O.upf",
         },
         abacus_orbitals={
             "Ta": "Ta.orb",
             "P": "P.orb",
+            "Si": "Si.orb",
+            "O": "O.orb",
         },
         siesta_basis_profile="tap",
         min_kmesh_scf=(8, 8, 8),
@@ -97,14 +103,20 @@ MATERIALS: dict[str, MaterialPreset] = {
         siesta_pseudopots={
             "Nb": "Nb.psml",
             "P": "P.psml",
+            "Si": "Si.psml",
+            "O": "O.psml",
         },
         abacus_pseudopots={
             "Nb": "Nb.upf",
             "P": "P.upf",
+            "Si": "Si.upf",
+            "O": "O.upf",
         },
         abacus_orbitals={
             "Nb": "Nb.orb",
             "P": "P.orb",
+            "Si": "Si.orb",
+            "O": "O.orb",
         },
         siesta_basis_profile="nbp",
         min_kmesh_scf=(8, 8, 8),
@@ -160,6 +172,40 @@ MATERIALS: dict[str, MaterialPreset] = {
         siesta_basis_profile="default",
         min_kmesh_scf=(2, 2, 2),
         min_kmesh_nscf=(3, 3, 3),
+    ),
+    "TiS": MaterialPreset(
+        name="TiS",
+        formula="TiS",
+        space_group="P-6m2",
+        material_class="generic",
+        projections=["Ti:d", "S:p"],
+        num_wann=16,
+        num_bands=24,
+        dis_win=(-8.0, 8.0),
+        dis_froz_win=(-2.0, 2.0),
+        pseudopots={
+            "Ti": "Ti.pbe-spn-rrkjus_psl.1.0.0.UPF",
+            "S": "S.pbe-n-rrkjus_psl.1.0.0.UPF",
+        },
+        vasp_potcars={
+            "Ti": "Ti/POTCAR",
+            "S": "S/POTCAR",
+        },
+        siesta_pseudopots={
+            "Ti": "Ti.psml",
+            "S": "S.psml",
+        },
+        abacus_pseudopots={
+            "Ti": "Ti.upf",
+            "S": "S.upf",
+        },
+        abacus_orbitals={
+            "Ti": "Ti.orb",
+            "S": "S.orb",
+        },
+        siesta_basis_profile="default",
+        min_kmesh_scf=(12, 12, 8),
+        min_kmesh_nscf=(16, 16, 12),
     ),
 }
 

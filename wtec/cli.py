@@ -8486,6 +8486,7 @@ def _run_rgf_benchmark_axis(
     log_poll_interval: int,
     stale_log_seconds: int,
     required_exact_eta: float | None = None,
+    stop_on_partial_failure: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from wtec.workflow.orchestrator import TopoSlabWorkflow, resolve_transport_rgf_eta
 
@@ -8583,31 +8584,32 @@ def _run_rgf_benchmark_axis(
                     "transmission_e2_over_h": _extract_single_transmission_from_rgf(rgf_result),
                 }
             )
-            partial_summary = _load_existing_nanowire_partial_overlap(
-                axis_dir=axis_dir,
-                spec=spec,
-                required_exact_eta=required_exact_eta,
-            )
-            if partial_summary is not None:
-                partial_comparison = partial_summary.get("comparison")
-                if (
-                    isinstance(partial_comparison, dict)
-                    and str(partial_comparison.get("status", "")).strip().lower() == "failed"
-                ):
-                    _append_nanowire_benchmark_trace(
-                        trace_path,
-                        "rgf_case_partial_failure",
-                        tag=tag,
-                        run_dir=str(run_root),
-                        overlap_points=int(partial_summary.get("overlap_points", 0) or 0),
-                        max_abs_err=float(partial_comparison.get("max_abs_err", 0.0) or 0.0),
-                    )
-                    raise _PartialOverlapFailure(
-                        f"Current overlap already proves benchmark failure for {getattr(model, 'key', 'model')}:{axis}",
-                        partial_summary=partial_summary,
-                        rgf_rows=rgf_rows,
-                        rgf_jobs=rgf_jobs,
-                    )
+            if stop_on_partial_failure:
+                partial_summary = _load_existing_nanowire_partial_overlap(
+                    axis_dir=axis_dir,
+                    spec=spec,
+                    required_exact_eta=required_exact_eta,
+                )
+                if partial_summary is not None:
+                    partial_comparison = partial_summary.get("comparison")
+                    if (
+                        isinstance(partial_comparison, dict)
+                        and str(partial_comparison.get("status", "")).strip().lower() == "failed"
+                    ):
+                        _append_nanowire_benchmark_trace(
+                            trace_path,
+                            "rgf_case_partial_failure",
+                            tag=tag,
+                            run_dir=str(run_root),
+                            overlap_points=int(partial_summary.get("overlap_points", 0) or 0),
+                            max_abs_err=float(partial_comparison.get("max_abs_err", 0.0) or 0.0),
+                        )
+                        raise _PartialOverlapFailure(
+                            f"Current overlap already proves benchmark failure for {getattr(model, 'key', 'model')}:{axis}",
+                            partial_summary=partial_summary,
+                            rgf_rows=rgf_rows,
+                            rgf_jobs=rgf_jobs,
+                        )
             _append_nanowire_benchmark_trace(
                 trace_path,
                 "rgf_case_done",
@@ -8616,6 +8618,32 @@ def _run_rgf_benchmark_axis(
                 job_id=(rgf_job or {}).get("job_id"),
             )
     return rgf_rows, rgf_jobs
+
+
+def _subset_nanowire_benchmark_spec(
+    spec: Any,
+    *,
+    thicknesses: tuple[int, ...],
+    energies: tuple[float, ...],
+) -> Any:
+    cfg = spec
+    if thicknesses:
+        invalid = [int(v) for v in thicknesses if int(v) not in {int(x) for x in spec.thicknesses_uc}]
+        if invalid:
+            raise click.UsageError(
+                "Unsupported --thickness values for the TiS benchmark: "
+                + ", ".join(str(v) for v in invalid)
+            )
+        cfg = replace(cfg, thicknesses_uc=tuple(int(v) for v in thicknesses))
+    if energies:
+        invalid = [float(v) for v in energies if float(v) not in {float(x) for x in spec.energies_ev}]
+        if invalid:
+            raise click.UsageError(
+                "Unsupported --energy values for the TiS benchmark: "
+                + ", ".join(str(v) for v in invalid)
+            )
+        cfg = replace(cfg, energies_ev=tuple(float(v) for v in energies))
+    return cfg
 
 
 def _run_kwant_and_rgf_overlap(
@@ -8831,6 +8859,7 @@ def benchmark_transport(
             log_poll_interval=log_poll_interval,
             stale_log_seconds=stale_log_seconds,
         )
+        source_cfg["transport_walltime"] = str(walltime)
         resumed = _load_benchmark_source_resume(model_root)
         if resumed is not None:
             hr_dat, win_path, fermi_ev_f = resumed
@@ -9331,6 +9360,470 @@ def benchmark_transport(
             + ", ".join(failed_targets)
             + f". See {summary_path}"
         )
+
+
+@main.command("benchmark-transport-rgf")
+@click.argument("config_file", required=False, type=click.Path(dir_okay=False))
+@click.option(
+    "--output-dir",
+    default="",
+    help="Local benchmark workspace. Default: .wtec/references/nanowire_benchmarks/mp-1018028",
+)
+@click.option("--queue", default="g4", show_default=True, help="PBS queue for benchmark submissions.")
+@click.option(
+    "--walltime",
+    default="01:00:00",
+    show_default=True,
+    help="PBS walltime per native-RGF benchmark case.",
+)
+@click.option(
+    "--live-log/--no-live-log",
+    default=True,
+    help="Stream remote benchmark logs while jobs run.",
+)
+@click.option(
+    "--log-poll-interval",
+    type=int,
+    default=5,
+    show_default=True,
+    help="Seconds between scheduler/log polling.",
+)
+@click.option(
+    "--stale-log-seconds",
+    type=int,
+    default=300,
+    show_default=True,
+    help="Warn if a benchmark job is RUNNING but logs do not grow for this long.",
+)
+@click.option(
+    "--source-nodes",
+    type=int,
+    default=2,
+    show_default=True,
+    help="Nodes reserved for the QE/Wannier source build before the TiS article RGF sweep.",
+)
+@click.option(
+    "--thickness",
+    "thicknesses",
+    multiple=True,
+    type=int,
+    help="Restrict the sequential sweep to these thickness_uc values. Repeat the option.",
+)
+@click.option(
+    "--energy",
+    "energies",
+    multiple=True,
+    type=float,
+    help="Restrict the sequential sweep to these energy_rel_fermi_ev values. Repeat the option.",
+)
+@click.option(
+    "--compare-existing-kwant/--no-compare-existing-kwant",
+    default=True,
+    help="Write partial/full Kwant comparison artifacts when matching Kwant checkpoints already exist.",
+)
+def benchmark_transport_rgf(
+    config_file: str | None,
+    output_dir: str,
+    queue: str,
+    walltime: str,
+    live_log: bool,
+    log_poll_interval: int,
+    stale_log_seconds: int,
+    source_nodes: int,
+    thicknesses: tuple[int, ...],
+    energies: tuple[float, ...],
+    compare_existing_kwant: bool,
+) -> None:
+    """Run the verified TiS nanowire article sweep with native RGF only, sequentially."""
+    from wtec.transport.nanowire_benchmark import (
+        NanowireBenchmarkSpec,
+        build_article_fit_summary,
+        compare_fit_summaries,
+        compare_reference_and_rgf,
+        compute_length_uc,
+        fit_rows_to_csv_lines,
+        prepare_canonicalized_inputs,
+        rows_to_csv_lines,
+        select_benchmark_models,
+    )
+    from wtec.transport.kwant_nanowire_benchmark import kwant_reference_is_complete
+    from wtec.wannier.parser import read_hr_dat
+    from wtec.rgf import effective_principal_layer_width
+    from wtec.workflow.orchestrator import TopoSlabWorkflow, resolve_transport_rgf_eta
+
+    config_path = _resolve_run_config_path(config_file)
+    _load_runtime_dotenv(str(config_path))
+    base_cfg = _load_run_config(config_path)
+    base_cfg["_runtime_config_dir"] = str(config_path.parent.resolve())
+
+    if log_poll_interval <= 0:
+        raise click.UsageError("--log-poll-interval must be > 0")
+    if stale_log_seconds <= 0:
+        raise click.UsageError("--stale-log-seconds must be > 0")
+    if source_nodes <= 0:
+        raise click.UsageError("--source-nodes must be > 0")
+
+    if queue:
+        _apply_env_updates_to_process({"TOPOSLAB_PBS_QUEUE": str(queue).strip()})
+
+    benchmark_root = _nanowire_benchmark_root(output_dir)
+    benchmark_root.mkdir(parents=True, exist_ok=True)
+    spec = _subset_nanowire_benchmark_spec(
+        NanowireBenchmarkSpec(),
+        thicknesses=tuple(int(v) for v in thicknesses),
+        energies=tuple(float(v) for v in energies),
+    )
+    selected_models = select_benchmark_models(spec, include_supplementary=False)
+    transport_nodes = max(1, int(base_cfg.get("n_nodes", 1) or 1))
+    _ensure_nanowire_benchmark_rgf_router_ready(selected_models=selected_models)
+    structure_file = _resolve_nanowire_benchmark_source_structure(
+        base_cfg=base_cfg,
+        benchmark_root=benchmark_root,
+        selected_models=selected_models,
+        material=spec.material,
+        default_mp_id=spec.mp_id,
+    )
+    source_cfg_seed = _build_nanowire_benchmark_source_seed(
+        base_cfg=base_cfg,
+        benchmark_root=benchmark_root,
+        material=spec.material,
+        default_mp_id=spec.mp_id,
+    )
+    if structure_file:
+        click.echo(click.style(f"[benchmark-rgf] source structure: {structure_file}", fg="cyan"))
+    else:
+        click.echo(click.style("[benchmark-rgf] source structure: reusing existing source artifacts", fg="cyan"))
+    click.echo(
+        click.style(
+            "[benchmark-rgf] models: "
+            + ", ".join(f"{model.key}{'*' if model.primary_for_rgf else ''}" for model in selected_models),
+            fg="cyan",
+        )
+    )
+    click.echo(
+        click.style(
+            f"[benchmark-rgf] source_n_nodes={int(source_nodes)} transport_n_nodes={int(transport_nodes)}",
+            fg="cyan",
+        )
+    )
+
+    summary: dict[str, Any] = {
+        "status": "ok",
+        "execution_mode": "sequential_rgf_only",
+        "mp_id": spec.mp_id,
+        "material": spec.material,
+        "selected_model_keys": [str(model.key) for model in selected_models],
+        "source_n_nodes": int(source_nodes),
+        "transport_n_nodes": int(transport_nodes),
+        "compare_existing_kwant": bool(compare_existing_kwant),
+        "article_protocol": {
+            "transport_axis_crystal": "[001]",
+            "surface_of_interest": "(010)",
+            "axis_permutations": list(spec.axes),
+            "energies_rel_fermi_ev": [float(v) for v in spec.energies_ev],
+            "thicknesses_uc": [int(v) for v in spec.thicknesses_uc],
+            "fixed_width_uc": int(spec.fixed_width_uc),
+            "trim_exclude_thicknesses_uc": [int(v) for v in spec.trim_exclude_thicknesses_uc],
+        },
+        "models": {},
+    }
+
+    for model in selected_models:
+        model_root = benchmark_root / model.key
+        model_root.mkdir(parents=True, exist_ok=True)
+        source_cfg = _build_tis_benchmark_source_cfg(
+            base_cfg=base_cfg,
+            benchmark_root=model_root,
+            structure_file=structure_file,
+            source_name=f"nanowire_benchmark_source_{model.key}_{spec.mp_id}",
+            custom_projections=list(model.custom_projections),
+            source_n_nodes=int(source_nodes),
+            live_log=live_log,
+            log_poll_interval=log_poll_interval,
+            stale_log_seconds=stale_log_seconds,
+        )
+        source_cfg["transport_walltime"] = str(walltime)
+        resumed = _load_benchmark_source_resume(model_root)
+        if resumed is not None:
+            hr_dat, win_path, fermi_ev_f = resumed
+            click.echo(
+                click.style(
+                    f"[benchmark-rgf] model={model.key}: reusing source artifacts {hr_dat}",
+                    fg="cyan",
+                )
+            )
+        else:
+            if not structure_file:
+                structure_file = _ensure_pes_reference_structure_from_mp(source_cfg_seed)
+                click.echo(click.style(f"[benchmark-rgf] source structure: {structure_file}", fg="cyan"))
+            source_checkpoint = _checkpoint_file_for_cfg(source_cfg)
+            if source_checkpoint.exists():
+                source_checkpoint.unlink()
+            click.echo(click.style(f"[benchmark-rgf] model={model.key}: running QE→Wannier source build", fg="cyan"))
+            source_wf = TopoSlabWorkflow.from_config(source_cfg)
+            source_result = source_wf.run_stage("WANNIER90")
+            hr_dat = Path(str(source_result["hr_dat"])).expanduser().resolve()
+            fermi_ev = source_wf._state.get("outputs", {}).get("fermi_ev")
+            if fermi_ev is None:
+                raise click.ClickException(
+                    f"Benchmark source run for {model.key} completed without fermi_ev in checkpoint state."
+                )
+            fermi_ev_f = float(fermi_ev)
+            win_path = hr_dat.with_name(f"{spec.material}.win")
+            if not win_path.exists():
+                raise click.ClickException(f"Benchmark source run produced no .win file: {win_path}")
+            (model_root / "source_artifacts.json").write_text(
+                json.dumps(
+                    {
+                        "hr_dat": str(hr_dat),
+                        "win_path": str(win_path),
+                        "fermi_ev": float(fermi_ev_f),
+                        "model_key": model.key,
+                        "model_label": model.label,
+                        "custom_projections": list(model.custom_projections),
+                    },
+                    indent=2,
+                )
+            )
+
+        model_summary: dict[str, Any] = {
+            "label": model.label,
+            "custom_projections": list(model.custom_projections),
+            "primary_for_rgf": bool(model.primary_for_rgf),
+            "source_hr_dat": str(hr_dat),
+            "source_win_path": str(win_path),
+            "fermi_ev": float(fermi_ev_f),
+            "axes": {},
+        }
+
+        for axis in spec.axes:
+            axis_dir = model_root / axis
+            axis_dir.mkdir(parents=True, exist_ok=True)
+            click.echo(
+                click.style(
+                    f"[benchmark-rgf] model={model.key} axis={axis}: canonicalizing HR/WIN",
+                    fg="cyan",
+                )
+            )
+            canonical = prepare_canonicalized_inputs(
+                hr_dat_path=hr_dat,
+                win_path=win_path,
+                axis=axis,
+                out_dir=axis_dir / "canonical",
+                seedname=f"{spec.material}_{model.key}_{axis}",
+            )
+            hd = read_hr_dat(canonical.hr_dat_path)
+            max_thickness = max(int(v) for v in spec.thicknesses_uc)
+            p_eff = effective_principal_layer_width(
+                hd,
+                lead_axis="x",
+                n_layers_x=max(2, int(max_thickness)),
+                n_layers_y=int(spec.fixed_width_uc),
+                n_layers_z=int(max_thickness),
+                mode="full_finite",
+                periodic_axis=None,
+            )
+            length_uc = compute_length_uc(p_eff, spec=spec)
+            exact_sigma_cfg = dict(source_cfg)
+            exact_sigma_cfg["transport_rgf_mode"] = "full_finite"
+            exact_sigma_cfg["_transport_rgf_internal_sigma_mode"] = "kwant_exact"
+            required_exact_eta = float(
+                resolve_transport_rgf_eta(
+                    exact_sigma_cfg,
+                    internal_sigma_mode="kwant_exact",
+                )
+            )
+            click.echo(
+                click.style(
+                    f"[benchmark-rgf] model={model.key} axis={axis}: p_eff={p_eff}, length_uc={length_uc}, width_uc={spec.fixed_width_uc}, queue={queue}, eta={required_exact_eta:g}",
+                    fg="cyan",
+                )
+            )
+            rgf_rows, rgf_jobs = _run_rgf_benchmark_axis(
+                source_cfg=source_cfg,
+                axis_dir=axis_dir,
+                canonical=canonical,
+                model=model,
+                axis=axis,
+                spec=spec,
+                fermi_ev_f=fermi_ev_f,
+                length_uc=length_uc,
+                transport_nodes=int(transport_nodes),
+                live_log=live_log,
+                log_poll_interval=log_poll_interval,
+                stale_log_seconds=stale_log_seconds,
+                required_exact_eta=required_exact_eta,
+                stop_on_partial_failure=False,
+            )
+            trimmed_thicknesses = [
+                int(v) for v in spec.thicknesses_uc if int(v) not in {int(x) for x in spec.trim_exclude_thicknesses_uc}
+            ]
+            if len(spec.thicknesses_uc) < 2 or len(trimmed_thicknesses) < 2:
+                rgf_fit = {
+                    "status": "skipped",
+                    "reason": "insufficient_thickness_points_for_fit",
+                    "all_points": [],
+                    "trimmed_points": [],
+                    "thickness_count": int(len(spec.thicknesses_uc)),
+                    "trimmed_thickness_count": int(len(trimmed_thicknesses)),
+                }
+            else:
+                rgf_fit = build_article_fit_summary(
+                    rgf_rows,
+                    energies_ev=spec.energies_ev,
+                    thicknesses_uc=spec.thicknesses_uc,
+                    trim_exclude_thicknesses_uc=spec.trim_exclude_thicknesses_uc,
+                )
+            (axis_dir / "rgf_raw.csv").write_text(
+                "\n".join(rows_to_csv_lines(rgf_rows)) + "\n",
+                encoding="utf-8",
+            )
+            (axis_dir / "rgf_raw.json").write_text(
+                json.dumps({"records": rgf_rows, "jobs": rgf_jobs, "required_exact_eta": required_exact_eta}, indent=2)
+            )
+            (axis_dir / "rgf_fit.csv").write_text(
+                "\n".join(fit_rows_to_csv_lines(rgf_fit)) + "\n",
+                encoding="utf-8",
+            )
+            (axis_dir / "rgf_fit.json").write_text(json.dumps(rgf_fit, indent=2))
+
+            axis_summary: dict[str, Any] = {
+                "status": "ok",
+                "validation_status": "not_evaluated",
+                "length_uc": int(length_uc),
+                "fixed_width_uc": int(spec.fixed_width_uc),
+                "principal_layer_width": int(p_eff),
+                "required_exact_eta": float(required_exact_eta),
+                "rgf_jobs": rgf_jobs,
+                "rgf_points": int(len(rgf_rows)),
+                "rgf_fit_status": str(rgf_fit.get("status", "")),
+            }
+
+            if compare_existing_kwant:
+                kwant_reference_path = axis_dir / "kwant" / "kwant_reference.json"
+                if (axis_dir / "kwant").exists():
+                    partial_summary = _write_partial_nanowire_axis_artifacts(
+                        axis_dir=axis_dir,
+                        spec=spec,
+                        required_exact_eta=required_exact_eta,
+                    )
+                    axis_summary["partial_overlap"] = {
+                        "status": str(partial_summary.get("status", "unknown")),
+                        "overlap_points": int(partial_summary.get("overlap_points", 0) or 0),
+                        "comparison": partial_summary.get("comparison"),
+                        "missing_in_rgf": len(partial_summary.get("missing_in_rgf", []) or []),
+                        "missing_in_kwant": len(partial_summary.get("missing_in_kwant", []) or []),
+                    }
+                    kwant_result = _load_complete_nanowire_kwant_reference(kwant_reference_path, spec=spec)
+                    if kwant_result is not None and kwant_reference_is_complete(
+                        kwant_result,
+                        thicknesses=[int(v) for v in spec.thicknesses_uc],
+                        energies_rel_fermi_ev=[float(v) for v in spec.energies_ev],
+                    ):
+                        raw_records = list(kwant_result.get("results", []))
+                        if len(spec.thicknesses_uc) < 2 or len(trimmed_thicknesses) < 2:
+                            kwant_fit = {
+                                "status": "skipped",
+                                "reason": "insufficient_thickness_points_for_fit",
+                                "all_points": [],
+                                "trimmed_points": [],
+                                "thickness_count": int(len(spec.thicknesses_uc)),
+                                "trimmed_thickness_count": int(len(trimmed_thicknesses)),
+                            }
+                        else:
+                            kwant_fit = build_article_fit_summary(
+                                raw_records,
+                                energies_ev=spec.energies_ev,
+                                thicknesses_uc=spec.thicknesses_uc,
+                                trim_exclude_thicknesses_uc=spec.trim_exclude_thicknesses_uc,
+                            )
+                        raw_comparison = compare_reference_and_rgf(
+                            raw_records,
+                            rgf_rows,
+                            abs_tol=spec.abs_tol,
+                            rel_tol=spec.rel_tol,
+                            zero_tol=spec.zero_tol,
+                        )
+                        fit_comparison = None
+                        if str(kwant_fit.get("status", "")).strip().lower() == "ok" and str(
+                            rgf_fit.get("status", "")
+                        ).strip().lower() == "ok":
+                            fit_comparison = compare_fit_summaries(
+                                kwant_fit,
+                                rgf_fit,
+                                abs_tol=spec.abs_tol,
+                                rel_tol=spec.rel_tol,
+                                zero_tol=spec.zero_tol,
+                                r2_abs_tol=spec.fit_r2_abs_tol,
+                            )
+                        (axis_dir / "comparison_raw.json").write_text(
+                            json.dumps(
+                                {
+                                    "status": raw_comparison.status,
+                                    "checked_points": raw_comparison.checked_points,
+                                    "max_abs_err": raw_comparison.max_abs_err,
+                                    "max_rel_err": raw_comparison.max_rel_err,
+                                    "failures": raw_comparison.failures,
+                                },
+                                indent=2,
+                            )
+                        )
+                        (axis_dir / "comparison_fit.json").write_text(
+                            json.dumps(
+                                (
+                                    {
+                                        "status": fit_comparison.status,
+                                        "checked_rows": fit_comparison.checked_rows,
+                                        "max_abs_err": fit_comparison.max_abs_err,
+                                        "max_rel_err": fit_comparison.max_rel_err,
+                                        "max_r2_abs_err": fit_comparison.max_r2_abs_err,
+                                        "failures": fit_comparison.failures,
+                                    }
+                                    if fit_comparison is not None
+                                    else {
+                                        "status": "skipped",
+                                        "reason": "insufficient_thickness_points_for_fit",
+                                    }
+                                ),
+                                indent=2,
+                            )
+                        )
+                        axis_summary["validation_status"] = (
+                            "ok"
+                            if raw_comparison.status == "ok"
+                            and (fit_comparison is None or fit_comparison.status == "ok")
+                            else "failed"
+                        )
+                        axis_summary["raw_comparison"] = {
+                            "status": raw_comparison.status,
+                            "checked_points": raw_comparison.checked_points,
+                            "max_abs_err": raw_comparison.max_abs_err,
+                            "max_rel_err": raw_comparison.max_rel_err,
+                            "failures": raw_comparison.failures,
+                        }
+                        axis_summary["fit_comparison"] = (
+                            {
+                                "status": fit_comparison.status,
+                                "checked_rows": fit_comparison.checked_rows,
+                                "max_abs_err": fit_comparison.max_abs_err,
+                                "max_rel_err": fit_comparison.max_rel_err,
+                                "max_r2_abs_err": fit_comparison.max_r2_abs_err,
+                                "failures": fit_comparison.failures,
+                            }
+                            if fit_comparison is not None
+                            else {
+                                "status": "skipped",
+                                "reason": "insufficient_thickness_points_for_fit",
+                            }
+                        )
+
+            model_summary["axes"][axis] = axis_summary
+
+        summary["models"][model.key] = model_summary
+
+    summary_path = benchmark_root / "rgf_sequential_summary.json"
+    summary_path.write_text(json.dumps(summary, indent=2))
+    click.echo(click.style(f"[benchmark-rgf] summary: {summary_path}", fg="green"))
 
 
 @main.command("benchmark-force-stress")

@@ -1851,6 +1851,13 @@ class TopoSlabWorkflow:
         )
         shutil.copy2(cert_path, attempt_dir / cert_path.name)
         shutil.copy2(final_result_path, attempt_dir / final_result_path.name)
+        pruned_attempt_artifacts: list[str] = []
+        if sigma_left_name and sigma_right_name:
+            pruned_attempt_artifacts = self._prune_transport_attempt_duplicates(
+                transport_dir,
+                attempt_dir=attempt_dir,
+                duplicate_names=[sigma_left_name, sigma_right_name],
+            )
         if isinstance(meta, dict):
             meta["attempt_dir"] = str(attempt_dir)
             meta["attempt_tag"] = str(attempt_tag)
@@ -1862,6 +1869,8 @@ class TopoSlabWorkflow:
                 "stdout_log": stdout_log_name,
                 "script": local_script_name,
             }
+            if pruned_attempt_artifacts:
+                meta["attempt_pruned_artifacts"] = list(pruned_attempt_artifacts)
         if isinstance(meta_payload, dict):
             meta_payload["rgf_attempt_dir"] = str(attempt_dir)
             meta_payload["rgf_attempt_tag"] = str(attempt_tag)
@@ -1875,6 +1884,19 @@ class TopoSlabWorkflow:
                     "script": local_script_name,
                 }
             )
+            if pruned_attempt_artifacts:
+                meta_payload["rgf_attempt_pruned_artifacts"] = list(pruned_attempt_artifacts)
+        final_result_path.write_text(
+            json.dumps(
+                {
+                    "transport_results": _jsonable(results),
+                    "runtime_cert": _jsonable(runtime_cert),
+                    "transport_results_raw": _jsonable(raw_payload),
+                },
+                indent=2,
+            )
+        )
+        shutil.copy2(final_result_path, attempt_dir / final_result_path.name)
         return self._normalize_transport_results(results), meta
 
     @staticmethod
@@ -1943,6 +1965,40 @@ class TopoSlabWorkflow:
             if src.exists() and src.is_file():
                 shutil.copy2(src, attempt_dir / src.name)
         return attempt_dir
+
+    @staticmethod
+    def _prune_transport_attempt_duplicates(
+        transport_dir: Path,
+        *,
+        attempt_dir: Path,
+        duplicate_names: list[str],
+    ) -> list[str]:
+        if not attempt_dir.is_dir():
+            return []
+        # Only prune after the successful point artifacts exist in both places.
+        if not (transport_dir / "transport_result.json").is_file():
+            return []
+        if not (transport_dir / "transport_runtime_cert.json").is_file():
+            return []
+        if not (attempt_dir / "transport_result.json").is_file():
+            return []
+        if not (attempt_dir / "transport_runtime_cert.json").is_file():
+            return []
+
+        removed: list[str] = []
+        for name in duplicate_names:
+            local_file = transport_dir / str(name)
+            archived_file = attempt_dir / str(name)
+            if not local_file.is_file() or not archived_file.is_file():
+                continue
+            try:
+                if local_file.stat().st_size != archived_file.stat().st_size:
+                    continue
+                archived_file.unlink()
+                removed.append(str(name))
+            except OSError:
+                continue
+        return removed
 
     @staticmethod
     def _normalize_transport_results(results: dict) -> dict:

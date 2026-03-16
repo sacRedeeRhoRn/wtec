@@ -44,7 +44,7 @@ class SiestaPipeline:
         basis_profile: str = "",
         wannier_interface: str = "sisl",
         spin_orbit: bool = True,
-        include_pao_basis: bool = True,
+        include_pao_basis: bool = False,
         mpi_np_scf: int = 0,
         mpi_np_nscf: int = 0,
         mpi_np_wannier: int = 0,
@@ -143,6 +143,8 @@ class SiestaPipeline:
                 job_name=f"scf_{self.material}"[:15],
                 n_nodes=self.n_nodes,
                 n_cores_per_node=cores_per_node,
+                mpi_procs_per_node=max(1, int((mpi_np + max(1, self.n_nodes) - 1) // max(1, self.n_nodes))),
+                omp_threads=max(1, int(omp_threads)),
                 walltime=self.walltime_scf,
                 memory_gb=self._estimate_memory_gb(),
                 queue=queue,
@@ -197,6 +199,8 @@ class SiestaPipeline:
                 job_name=f"nscf_{self.material}"[:15],
                 n_nodes=self.n_nodes,
                 n_cores_per_node=cores_per_node,
+                mpi_procs_per_node=max(1, int((mpi_np + max(1, self.n_nodes) - 1) // max(1, self.n_nodes))),
+                omp_threads=max(1, int(omp_threads)),
                 walltime=self.walltime_nscf,
                 memory_gb=self._estimate_memory_gb(),
                 queue=queue,
@@ -277,6 +281,8 @@ class SiestaPipeline:
                 job_name=f"wan_{self.material}"[:15],
                 n_nodes=self.n_nodes,
                 n_cores_per_node=cores_per_node,
+                mpi_procs_per_node=max(1, int((mpi_np + max(1, self.n_nodes) - 1) // max(1, self.n_nodes))),
+                omp_threads=max(1, int(omp_threads)),
                 walltime=self.walltime_wan,
                 memory_gb=self._estimate_memory_gb(),
                 queue=queue,
@@ -478,7 +484,10 @@ class SiestaPipeline:
                 omp_thr = int(scoped_thr)
         if omp_thr <= 0:
             if self.omp_threads is not None and int(self.omp_threads) > 0:
-                omp_thr = int(self.omp_threads)
+                omp_thr = min(
+                    int(self.omp_threads),
+                    max(1, total_alloc // max(1, mpi_np)),
+                )
             else:
                 omp_thr = max(1, total_alloc // mpi_np)
         if mpi_np * omp_thr > total_alloc:
